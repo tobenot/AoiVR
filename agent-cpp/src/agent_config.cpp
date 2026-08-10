@@ -73,6 +73,7 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     cfg.tts.model = get(tts, "model", cfg.tts.model);
     cfg.tts.voice = get(tts, "voice", cfg.tts.voice);
   }
+  cfg.vrcxDbPath = get(root, "vrcxDbPath", "");
   return cfg;
 }
 

@@ -13,8 +13,10 @@
 #include "agent_utils.hpp"
 #include "base64.hpp"
 #include "builtin_tools.hpp"
+#include "convert_tools.hpp"
 #include "image_utils.hpp"
 #include "prompts.hpp"
+#include "sqlite_tools.hpp"
 #include "system_control.hpp"
 namespace aoi {
 
@@ -133,6 +135,8 @@ bool AoiAgent::start() {
   sessionConfig_.tools.push_back(makeBashTool());
   sessionConfig_.tools.push_back(makeEditTool());
   sessionConfig_.tools.push_back(makeWriteTool());
+  sessionConfig_.tools.push_back(makeSqlQueryTool(fileConfig_.vrcxDbPath));
+  sessionConfig_.tools.push_back(makeConvertTool());
   sessionConfig_.tools.push_back(makeScreenshotTool());
   sessionConfig_.tools.push_back(makeSystemTool());
   sessionConfig_.tools.push_back(makeInterpretationTool());
@@ -182,6 +186,13 @@ void AoiAgent::logLine(const std::string& line) const {
   {
     std::lock_guard<std::mutex> lk(logMutex_);
     sink = logSink_;
+  }
+  // Always mirror agent diagnostics to a file next to the log sink, so issues
+  // can be debugged from the release build (Unity doesn't forward agent stderr).
+  {
+    std::lock_guard<std::mutex> lk(logMutex_);
+    std::ofstream f("aoi_agent_debug.log", std::ios::app);
+    if (f) f << line << "\n";
   }
   if (sink) {
     sink(line);

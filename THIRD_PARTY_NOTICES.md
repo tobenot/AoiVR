@@ -159,6 +159,19 @@ ext.nunit) and the standard com.unity.modules.* built-in modules.
 
 ---
 
+## 13. SQLite — SQLite Consortium (D. Richard Hipp)
+
+- License: Public Domain
+- Official source: https://www.sqlite.org/
+- Version: 3.53.4 (amalgamation, vendored: sqlite3.c / sqlite3.h / sqlite3ext.h)
+- Official license URL: https://www.sqlite.org/copyright.html
+- Local license file: `licenses/sqlite.txt`
+- Local code files: agent-cpp/third_party/sqlite/
+- Used in: agent-cpp sql_query tool (read-only access to the VRCX SQLite
+  session store).
+
+---
+
 ## Compliance summary
 
 | Component | License | Official license URL | Verbatim file |
@@ -173,6 +186,7 @@ ext.nunit) and the standard com.unity.modules.* built-in modules.
 | libcurl | curl license | https://raw.githubusercontent.com/curl/curl/curl-8_11_0/COPYING | `licenses/curl.txt` |
 | miniaudio | Public Domain / MIT-0 | https://raw.githubusercontent.com/mackron/miniaudio/master/LICENSE | `licenses/miniaudio.txt` |
 | sherpa-onnx (optional) | Apache-2.0 | https://www.apache.org/licenses/LICENSE-2.0.txt | `licenses/apache2.txt` |
+| SQLite | Public Domain | https://www.sqlite.org/copyright.html | `licenses/sqlite.txt` |
 | Unity Engine + packages | Unity EULA | (Unity license terms) | — |
 
 No GPL / AGPL / LGPL / MPL-copyleft component is used at runtime.

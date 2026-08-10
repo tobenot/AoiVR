@@ -30,6 +30,9 @@ struct TtsSettings {
 struct AgentFileConfig {
   LlmConfig llm;
   TtsSettings tts;
+  // Optional custom path to the VRCX SQLite database (aoi_config.json top-level
+  // "vrcxDbPath"). Empty -> default %APPDATA%\VRCX\VRCX.sqlite3.
+  std::string vrcxDbPath;
 };
 
 // Load aoi_config.json from `workDir`. Missing file / unparsable JSON / missing

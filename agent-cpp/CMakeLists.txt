@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(aoi-agent-cpp VERSION 0.1.0 LANGUAGES CXX)
+project(aoi-agent-cpp VERSION 0.1.0 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,6 +27,8 @@ add_executable(aoi-agent
   src/tts.cpp
   src/sherpa_asr.cpp
   src/builtin_tools.cpp
+  src/sqlite_tools.cpp
+  src/convert_tools.cpp
   src/system_control.cpp
   src/llm_client.cpp
   src/agent_config.cpp
@@ -34,6 +36,7 @@ add_executable(aoi-agent
   src/interpreter.cpp
   src/environment_awareness.cpp
   src/agent.cpp
+  third_party/sqlite/sqlite3.c
 )
 
 target_include_directories(aoi-agent PRIVATE
@@ -43,6 +46,7 @@ target_include_directories(aoi-agent PRIVATE
   third_party/stb
   third_party/base64
   third_party/miniaudio
+  third_party/sqlite
 )
 
 # Static CRT for ALL targets (curl included) so aoi_agent.dll is self-contained
@@ -74,6 +78,7 @@ target_compile_definitions(aoi-agent PRIVATE
   NOMINMAX
   STB_IMAGE_IMPLEMENTATION
   STB_IMAGE_WRITE_IMPLEMENTATION
+  SQLITE_THREADSAFE=1
 )
 
 target_link_libraries(aoi-agent PRIVATE
@@ -114,6 +119,8 @@ set(AOI_AGENT_SOURCES
   src/tts.cpp
   src/sherpa_asr.cpp
   src/builtin_tools.cpp
+  src/sqlite_tools.cpp
+  src/convert_tools.cpp
   src/system_control.cpp
   src/llm_client.cpp
   src/agent_config.cpp
@@ -124,6 +131,7 @@ set(AOI_AGENT_SOURCES
 )
 add_library(aoi-agent-dll SHARED
   ${AOI_AGENT_SOURCES}
+  third_party/sqlite/sqlite3.c
   src/aoi_agent_api.cpp
 )
 set_target_properties(aoi-agent-dll PROPERTIES OUTPUT_NAME "aoi_agent")
@@ -134,11 +142,13 @@ target_include_directories(aoi-agent-dll PRIVATE
   third_party/stb
   third_party/base64
   third_party/miniaudio
+  third_party/sqlite
 )
 target_compile_definitions(aoi-agent-dll PRIVATE
   NOMINMAX
   STB_IMAGE_IMPLEMENTATION
   STB_IMAGE_WRITE_IMPLEMENTATION
+  SQLITE_THREADSAFE=1
   AOI_BUILD_DLL
 )
 # Static CRT so the DLL is self-contained inside Unity (no vcruntime dlls to ship).

@@ -46,7 +46,9 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 Get-ChildItem $build | Where-Object {
   $_.Name -notmatch "BackUpThisFolder_ButDontShipItWithYourGame" -and
   $_.Name -notmatch "_BurstDebugInformation_DoNotShip" -and
-  $_.Name -ne ".env"
+  $_.Name -ne ".env" -and
+  $_.Name -ne "aoi_debug.txt" -and
+  $_.Name -ne "rt_capture.png"
 } | ForEach-Object {
   Copy-Item $_.FullName $OutDir -Recurse -Force
 }
@@ -65,10 +67,18 @@ if (Test-Path $configExample) { Copy-Item $configExample (Join-Path $OutDir "aoi
 
 # licenses / notices
 Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.md") $OutDir
-Copy-Item (Join-Path $root "agent-cpp\THIRD_PARTY_NOTICES.md") (Join-Path $OutDir "THIRD_PARTY_NOTICES-CPP.md")
-Copy-Item (Join-Path $root "docs\OPEN_SOURCE_DEPENDENCIES.md") $OutDir -ErrorAction SilentlyContinue
 # Verbatim official license texts (referenced by the NOTICES index).
-Copy-Item (Join-Path $root "agent-cpp\licenses") (Join-Path $OutDir "licenses") -Recurse -Force
+Copy-Item (Join-Path $root "licenses") (Join-Path $OutDir "licenses") -Recurse -Force
+
+# VRChat integration skill docs (agent runtime loads these via the read tool;
+# the build normally carries them too, but copy from source so the package is
+# complete even if the Unity build step was skipped).
+$skillSrc = Join-Path $root "docs\vrchat-assistant"
+$skillDst = Join-Path $OutDir "docs\vrchat-assistant"
+if (Test-Path $skillSrc) {
+  if (Test-Path $skillDst) { Remove-Item $skillDst -Recurse -Force }
+  Copy-Item $skillSrc $skillDst -Recurse -Force
+}
 
 Write-Host "==> 4/4 launch.bat"
 $launch = @'

@@ -40,10 +40,22 @@ struct HttpClient::Impl {
   }
 };
 
+namespace {
+// libcurl requires curl_global_init() before any other curl call, and in
+// multi-threaded programs it MUST complete before threads start using curl.
+// The agent's first request can originate from a worker thread, so initialize
+// lazily but thread-safely with std::call_once.
+std::once_flag g_curlInitFlag;
+void ensureCurlInit() {
+  std::call_once(g_curlInitFlag, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
+}
+} // namespace
+
 HttpClient::~HttpClient() { delete impl_; }
 
 void* HttpClient::handle() {
   if (!impl_) {
+    ensureCurlInit();
     impl_ = new Impl();
     impl_->curl = curl_easy_init();
   }
@@ -82,12 +94,15 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
   // encoding keeps the raw SSE bytes flowing.
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
 
-  // Timeouts: connect 15s (fast fail on unreachable provider), low-speed guard
-  // 45s (no data transferred for 45s = dead stream, e.g. a hung 401). SSE stays
-  // open as long as data keeps flowing, so long replies are unaffected.
+  // Timeouts: connect 15s (fast fail on unreachable provider). NO low-speed
+  // guard: the opencode gateway's SSE stream routinely pauses for minutes
+  // between the tool-call announce chunk and the argument deltas (the model
+  // deliberates on the arguments / gateway buffering). A low-speed guard
+  // (45s, then 300s) killed those requests mid-stream and lost the tool
+  // arguments (announce-only bug); Python's urllib has no such guard and
+  // never failed. SSE stays open as long as the connection lives, so a dead
+  // stream is only detected by the connect timeout / cancellation.
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 45L);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
   // Headers.

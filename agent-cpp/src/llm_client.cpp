@@ -251,9 +251,27 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
   std::vector<ToolSlot> toolAccum;  // partial tool calls accumulated by index
   bool sawToolCall = false;
 
-  std::string buffer;  // SSE line buffer, scoped to this request
-  std::string rawBody;  // full raw response, captured for error diagnostics
-  const auto res = http_.postStream(url, headers, req.dump(), [&](const char* data, size_t len) {
+  // Streaming request with opencode-style settlement. Chat Completions has no
+  // per-tool `done` event, so arguments can only be assembled from deltas; if
+  // the gateway intermittently sends ONLY the opening chunk (id+name, no
+  // argument deltas -- the "announce-only" failure), the accumulated arguments
+  // stay empty and there is no protocol-level recovery. Detect that case and
+  // RETRY the request (the failure is intermittent, so a retry almost always
+  // lands on a healthy upstream) instead of dispatching a tool call with
+  // empty arguments that would spin in the repair loop.
+  const int kMaxStreamAttempts = 3;
+  for (int attempt = 1; ; ++attempt) {
+    // Per-attempt state reset.
+    toolAccum.clear();
+    sawToolCall = false;
+    outToolCalls.clear();
+    outText.clear();
+    finishReason.clear();
+    if (outReasoning) outReasoning->clear();
+
+    std::string buffer;  // SSE line buffer, scoped to this request
+    std::string rawBody;  // full raw response, captured for error diagnostics
+    const auto res = http_.postStream(url, headers, req.dump(), [&](const char* data, size_t len) {
     rawBody.append(data, len);
     buffer.append(data, len);    size_t pos;
     while ((pos = buffer.find('\n')) != std::string::npos) {
@@ -335,9 +353,22 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
               if (toolAccum.size() <= static_cast<size_t>(idx))
                 toolAccum.resize(static_cast<size_t>(idx) + 1);
               auto& slot = toolAccum[idx];
-              const std::string id = tc.value("id", "");
-              const std::string name = tc.value("function", nlohmann::json::object()).value("name", "");
-              const std::string args = tc.value("function", nlohmann::json::object()).value("arguments", "");
+              // IMPORTANT: JSON null must NOT be treated as a string. The
+              // gateway emits `"id": null` and `"function": {"name": null,
+              // "arguments": ...}` on argument-delta chunks; nlohmann's
+              // value(key, default) throws type_error when the stored value
+              // is null, and the outer catch would swallow the WHOLE chunk
+              // line -- dropping the arguments too (the announce-only bug).
+              std::string id, name, args;
+              if (tc.contains("id") && tc["id"].is_string())
+                id = tc["id"].get<std::string>();
+              if (tc.contains("function") && tc["function"].is_object()) {
+                const auto& fn = tc["function"];
+                if (fn.contains("name") && fn["name"].is_string())
+                  name = fn["name"].get<std::string>();
+                if (fn.contains("arguments") && fn["arguments"].is_string())
+                  args = fn["arguments"].get<std::string>();
+              }
               if (!id.empty()) slot.id = id;
               if (!name.empty()) slot.name += name;
               if (!args.empty()) slot.args += args;
@@ -371,6 +402,34 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
     *outTruncated = true;
   }
 
+  // opencode-style strict settlement (tool-stream.ts finishAll): assemble the
+  // tool calls from the accumulated deltas and validate the arguments as
+  // STRICT JSON. Empty or malformed arguments mean the gateway dropped the
+  // argument deltas (announce-only) -- there is no done-event fallback in Chat
+  // Completions, so instead of papering over with "{}", retry the request.
+  bool argsLost = false;
+  if (sawToolCall) {
+    for (const auto& slot : toolAccum) {
+      if (!slot.name.empty() &&
+          (slot.args.empty() ||
+           nlohmann::json::parse(slot.args, nullptr, false).is_discarded())) {
+        argsLost = true;
+        break;
+      }
+    }
+  }
+  if (argsLost && attempt < kMaxStreamAttempts && !isCancelled()) {
+    log("[LLM] stream returned a tool call with missing/incomplete arguments "
+        "(announce-only); retrying (attempt " + std::to_string(attempt + 1) +
+        "/" + std::to_string(kMaxStreamAttempts) + ")");
+    continue;
+  }
+  if (argsLost) {
+    log("[LLM] tool arguments still missing after " +
+        std::to_string(kMaxStreamAttempts) + " attempts; aborting turn");
+    return false;
+  }
+
   if (sawToolCall) {
     for (auto& slot : toolAccum) {
       nlohmann::json call;
@@ -378,15 +437,20 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
       call["type"] = "function";
       call["function"]["name"] = slot.name;
       // OpenAI protocol requires arguments to be a JSON-ENCODED STRING (the raw
-      // accumulated stream text). Parsing it to an object here breaks the
-      // round-trip: when this tool_calls array is sent back on the next turn,
-      // the provider rejects a non-string `arguments` with HTTP 400. Keep the
-      // original string exactly as streamed.
+      // accumulated stream text). Validated above as strict JSON, so it is
+      // safe to round-trip verbatim on the next turn.
+      if (slot.args.size() > 300) {
+        log("[ToolStream] call name=" + slot.name + " rawArgs(len=" +
+            std::to_string(slot.args.size()) + ") head=\"" + slot.args.substr(0, 300) + "\"");
+      } else {
+        log("[ToolStream] call name=" + slot.name + " rawArgs=\"" + slot.args + "\"");
+      }
       call["function"]["arguments"] = slot.args;
       outToolCalls.push_back(std::move(call));
     }
   }
   return true;
+  }  // for attempt (stream retry on dropped arguments)
 }
 
 void LlmSession::maybeCompressHistory() {
@@ -627,6 +691,12 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
     }
     // History (with persisted audio/images) is used directly every iteration.
     const std::vector<ChatMessage>* turnHistory = &history_;
+    // Snapshot the history size BEFORE the turn so a failed request can roll
+    // back the assistant(tool_calls) + tool messages it appended. Without the
+    // rollback, a mid-turn failure (e.g. gateway 400/500) leaves a poisoned
+    // assistant message with malformed tool_calls in history, and every
+    // subsequent turn re-sends it and fails the same way.
+    const size_t histBeforeTurn = history_.size();
 
     std::vector<nlohmann::json> toolCalls;
     textOut.clear();
@@ -634,6 +704,7 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
     bool truncated = false;
     const bool ok = runTurn(*turnHistory, toolCalls, textOut, &truncated, &reasoningOut);
     if (!ok) {
+      history_.resize(histBeforeTurn);
       // Deliver a final (error) message so the UI never stays stuck on
       // "正在发送...". If we got partial text, use it; otherwise a clear note.
       SessionEvent ev;
@@ -697,6 +768,21 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
           args = nlohmann::json::parse(call["function"]["arguments"].get<std::string>());
         } catch (...) {
         }
+      }
+
+      // Per-tool-call diagnostic: name, raw argument string and parsed state.
+      // Helps debug loops where the model keeps omitting required parameters.
+      {
+        std::string rawArgs;
+        if (call["function"].contains("arguments") &&
+            call["function"]["arguments"].is_string())
+          rawArgs = call["function"]["arguments"].get<std::string>();
+        if (rawArgs.size() > 200) rawArgs = rawArgs.substr(0, 200) + "...";
+        const std::string parseState =
+            args.is_object() ? (args.empty() ? "EMPTY-OBJECT" : "ok")
+                             : (args.is_discarded() || args.is_null() ? "PARSE-FAIL" : "non-object");
+        log("[ToolLoop] turn#" + std::to_string(guard) + " call name=" + name +
+            " rawArgs=\"" + rawArgs + "\" parsed=" + parseState);
       }
 
       SessionEvent start;
@@ -766,6 +852,14 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
       done.toolName = name;
       done.result = resultText;
       emit(done);
+
+      // Tool result diagnostic (truncated).
+      {
+        std::string res = resultText;
+        if (res.size() > 200) res = res.substr(0, 200) + "...";
+        log("[ToolLoop] turn#" + std::to_string(guard) + " result name=" + name +
+            " text=\"" + res + "\"");
+      }
 
       ChatMessage toolMsg;
       toolMsg.role = "tool";

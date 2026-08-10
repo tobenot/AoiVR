@@ -109,7 +109,7 @@ ToolDefinition makeReadTool() {
   ToolDefinition t;
   t.name = "read";
   t.label = "read";
-  t.description = "Read a file from disk and return its contents. Use for inspecting files, configs, or source code.";
+  t.description = "Read a file from disk and return its contents. Use for inspecting files, configs, or source code. Always provide the required 'path' parameter.";
   t.parameters = {
       {"type", "object"},
       {"properties", nlohmann::json{{"path", {{"type", "string"}, {"description", "Absolute or relative file path"}}}}},
@@ -117,6 +117,8 @@ ToolDefinition makeReadTool() {
   };
   t.execute = [](const std::string&, const nlohmann::json& args) -> nlohmann::json {
     const std::string path = args.value("path", "");
+    if (path.empty())
+      return nlohmann::json{{"content", "(read: missing required parameter 'path' - call the tool again with the file path you want to read)"}};
     return nlohmann::json{{"content", readTextFile(path)}};
   };
   return t;

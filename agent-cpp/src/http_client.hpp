@@ -55,6 +55,11 @@ class HttpClient {
                     const std::string& body, OnData onData = nullptr,
                     CancelCheck cancel = nullptr);
 
+  // Simple GET returning the full body (used by the fetch tool; runs in the
+  // agent process - the sandbox's CreateProcessAsUserW children cannot use
+  // schannel, SEC_E_NO_CREDENTIALS).
+  Result get(const std::string& url, const std::vector<std::string>& headers = {});
+
   // Simple POST returning full body.
   Result post(const std::string& url, const std::vector<std::string>& headers,
               const std::string& body);

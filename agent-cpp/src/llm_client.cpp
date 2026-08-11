@@ -808,6 +808,9 @@ std::vector<ChatMessage> LlmSession::foldMultimodalHistory(
   // content DOES hit the gateway's prompt-prefix cache (1000x1000 PNG:
   // 1920/1937 cached on repeat), so keeping them in history keeps the
   // prefix stable and fully cacheable as the conversation grows.
+  // EXPERIMENT SWITCH (cache_lab): AOI_NO_FOLD keeps historical audio in the
+  // request verbatim to measure fold-vs-keep effects on cache & TTFT.
+  if (std::getenv("AOI_NO_FOLD")) return history;
   // Locate the current-turn user message: the LAST user message in history.
   size_t lastUserIdx = history.size();
   for (size_t i = history.size(); i-- > 0;) {

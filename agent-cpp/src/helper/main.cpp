@@ -75,11 +75,20 @@ std::string readTextFile(const std::string& path, size_t maxBytes = 60000) {
 }
 
 // ---- bash ----
+// Agent exe dir (argv[3]): used to resolve read paths relative to shipped
+// files (e.g. docs/...) when they don't exist inside the sandbox workspace.
+std::string g_exeDir;
 // The command runs through a WRITE_RESTRICTED restricted token (built once
 // from the helper's own token): restricting SIDs = [capability SID, sandbox
 // user SID, logon SID, Everyone]. Writes are OS-enforced to paths whose DACL
 // grants the capability SID - i.e. the sandbox workspace - regardless of how
 // permissive other directories are. Mirrors Codex token.rs.
+//
+// KNOWN LIMITATION: schannel/TLS (curl https, PowerShell Invoke-WebRequest)
+// fails inside WRITE_RESTRICTED children with SEC_E_NO_CREDENTIALS
+// (0x8009030e) - a Windows behavior that also affects Codex's sandbox (open
+// issue openai/codex#17459). The fetch tool provides network access instead
+// (it runs in the agent process where schannel works).
 HANDLE g_restrictedToken = nullptr;
 
 // Enable a privilege on a token if the token holds it (disabled -> enabled).
@@ -436,6 +445,10 @@ int main(int argc, char** argv) {
                    "without write isolation)\n");
     }
   }
+  // argv[3] = agent exe dir (for read fallback to shipped files).
+  if (argc >= 4 && *argv[3]) {
+    g_exeDir = argv[3];
+  }
   const std::string input = readAllStdin();
   json req = json::parse(input, nullptr, false);
   if (req.is_discarded() || !req.is_object() || !req.contains("op")) {
@@ -449,7 +462,16 @@ int main(int argc, char** argv) {
     if (op == "bash") {
       output = runBash(req.value("command", ""));
     } else if (op == "read") {
-      output = readTextFile(req.value("path", ""));
+      const std::string path = req.value("path", "");
+      output = readTextFile(path);
+      // Shipped knowledge files (e.g. docs/...) live next to the AGENT exe,
+      // outside the sandbox workspace. When the relative path does not exist
+      // in the workspace, resolve it against the exe dir (read-only fallback;
+      // write/edit NEVER follow this path).
+      if (output.rfind("(file not found", 0) == 0 && !g_exeDir.empty()) {
+        const std::string alt = readTextFile(g_exeDir + "\\" + path);
+        if (alt.rfind("(file not found", 0) != 0) output = alt;
+      }
     } else if (op == "write") {
       const std::string path = req.value("path", "");
       const std::string content = req.value("content", "");

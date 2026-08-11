@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 namespace aoi {
 
@@ -32,5 +33,11 @@ std::string sandboxExecute(const std::string& opJson);
 // NOT placed here; the agent process itself is trusted and never executes
 // model-controlled writes (those all go through sandboxExecute).
 std::string sandboxWorkspacePath();
+
+// Directories the sandbox user should be able to READ at startup (registered
+// from aoi_config.json "sandbox.read_dirs"). Relative entries resolve against
+// the agent exe dir. Applied (granted read+execute, inherited) by
+// ensureSandboxReady on the next sandbox call. Call once at agent start.
+void setSandboxReadDirs(const std::vector<std::string>& dirs);
 
 } // namespace aoi

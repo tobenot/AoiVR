@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 
 namespace aoi {
 
@@ -43,6 +44,13 @@ struct AgentFileConfig {
     int scriptTimeoutSeconds = 30;
     int scriptOutputLimitBytes = 102400;
   } hooks;
+  // Directories the sandbox user is granted READ+EXECUTE on at startup
+  // (aoi_config.json -> "sandbox" -> "read_dirs"). Relative entries resolve
+  // against the agent exe dir (e.g. "docs" -> <exeDir>\docs). Registered once
+  // per launch so the model can read shipped knowledge files that live outside
+  // the sandbox workspace. Never include aoi_config.json's directory itself:
+  // it holds API keys.
+  std::vector<std::string> sandboxReadDirs;
 };
 
 // Load aoi_config.json from `workDir`. Missing file / unparsable JSON / missing

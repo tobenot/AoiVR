@@ -22,9 +22,9 @@ if (-not $SkipUnityBuild) {
 
 Write-Host "==> 2/4 verify IL2CPP layout"
 $gameAssembly = Join-Path $build "GameAssembly.dll"
-# Unity may still be flushing large IL2CPP outputs to disk when its process
-# exits; poll briefly before declaring the build missing.
-for ($i = 0; $i -lt 20 -and -not (Test-Path $gameAssembly); $i++) {
+# Unity may still be flushing large IL2CPP outputs (GameAssembly.dll is tens of
+# MB) to disk when its process exits; poll generously before giving up.
+for ($i = 0; $i -lt 120 -and -not (Test-Path $gameAssembly); $i++) {
   Start-Sleep -Milliseconds 500
 }
 if (-not (Test-Path $gameAssembly)) {
@@ -69,6 +69,19 @@ if (-not (Test-Path $agentDll)) {
 # template only. The agent reads aoi_config.json from its workdir (exe dir).
 $configExample = Join-Path $root "agent-cpp\aoi_config.json.example"
 if (Test-Path $configExample) { Copy-Item $configExample (Join-Path $OutDir "aoi_config.json.example") }
+
+# Native sandbox binaries: the agent runs INSIDE aoi_agent.dll and resolves
+# the helper/setup exes next to the PROCESS exe (AoiVR.exe) - i.e. the package
+# root. Without them every tool call fails with "(sandbox: helper not found)".
+foreach ($bin in @("aoi-sandbox-helper.exe", "aoi-sandbox-setup.exe")) {
+  $srcBin = Join-Path $root "agent-cpp\build\Release\$bin"
+  if (Test-Path $srcBin) {
+    Copy-Item $srcBin (Join-Path $OutDir $bin)
+    Write-Host "  + sandbox bin: $bin"
+  } else {
+    Write-Host "WARNING: $bin not found at $srcBin - sandbox tools will fail at runtime"
+  }
+}
 
 # licenses / notices
 Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.md") $OutDir
@@ -139,8 +152,7 @@ Aoi - VR 应用
     OpenVR (BSD-3-Clause)、nlohmann/json (MIT)、libcurl (curl license)、
     miniaudio (Public Domain / MIT-0)、stb_image (Public Domain / MIT)、
     base64 (MIT)、Liberation Sans / Noto Sans CJK / JetBrains Mono (OFL-1.1)
-  - 完整清单与官方许可文本见 THIRD_PARTY_NOTICES.md、
-    THIRD_PARTY_NOTICES-CPP.md 及 licenses/ 目录。
+  - 完整清单与官方许可文本见 THIRD_PARTY_NOTICES.md 及 licenses/ 目录。
 "@
 [System.IO.File]::WriteAllText((Join-Path $OutDir "README.txt"), $readme, [System.Text.Encoding]::UTF8)
 

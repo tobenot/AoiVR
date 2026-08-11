@@ -168,4 +168,55 @@ HttpClient::Result HttpClient::post(const std::string& url,
   return postStream(url, headers, body, nullptr);
 }
 
+HttpClient::Result HttpClient::get(const std::string& url,
+                                   const std::vector<std::string>& headers) {
+  StreamCtx ctx;
+  std::vector<std::pair<std::string, std::string>> resultHeaders;
+
+  CURL* curl = static_cast<CURL*>(handle());
+  if (!curl) {
+    Result r;
+    r.status = -1;
+    return r;
+  }
+
+  curl_easy_reset(curl);
+  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+  curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resultHeaders);
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+  curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
+  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+  curl_slist* headerList = nullptr;
+  for (const auto& h : headers) {
+    headerList = curl_slist_append(headerList, h.c_str());
+  }
+  if (headerList) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerList);
+
+  const CURLcode res = curl_easy_perform(curl);
+  long status = 0;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+
+  Result result;
+  if (res == CURLE_ABORTED_BY_CALLBACK) {
+    result.status = -1;
+  } else {
+    result.status = static_cast<long>(status > 0 ? status : (res == CURLE_OK ? 0 : -1000));
+    if (res != CURLE_OK) result.error = curl_easy_strerror(res);
+  }
+  result.curlCode = static_cast<int>(res);
+  result.body = std::move(ctx.body);
+  result.headers = std::move(resultHeaders);
+
+  if (headerList) curl_slist_free_all(headerList);
+  return result;
+}
+
 } // namespace aoi

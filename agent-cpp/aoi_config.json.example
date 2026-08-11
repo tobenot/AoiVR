@@ -13,5 +13,8 @@
     "model": "mimo-v2.5-tts",
     "voice": "冰糖"
   },
-  "vrcxDbPath": ""
+  "vrcxDbPath": "",
+  "sandbox": {
+    "read_dirs": ["docs"]
+  }
 }

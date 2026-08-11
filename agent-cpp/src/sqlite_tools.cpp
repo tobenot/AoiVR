@@ -1,6 +1,7 @@
 #include "sqlite_tools.hpp"
 
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 #include "windows_sandbox.hpp"
@@ -15,6 +16,32 @@ std::string defaultVrcxPath() {
   const char* appdata = std::getenv("APPDATA");
   if (!appdata || !*appdata) return "";
   return std::string(appdata) + "\\VRCX\\VRCX.sqlite3";
+}
+
+// Expand %VAR% references using the AGENT process environment. The sandbox
+// user's environment differs (%APPDATA% points at ITS profile), so a literal
+// "%APPDATA%\..." passed by the model must be resolved HERE, before the path
+// reaches the sandboxed helper.
+std::string expandEnv(const std::string& in) {
+  std::string out = in;
+  size_t pos = 0;
+  while ((pos = out.find('%', pos)) != std::string::npos) {
+    const size_t end = out.find('%', pos + 1);
+    if (end == std::string::npos) break;
+    const std::string name = out.substr(pos + 1, end - pos - 1);
+    if (name.empty()) {
+      pos = end + 1;
+      continue;
+    }
+    const char* v = std::getenv(name.c_str());
+    if (v && *v) {
+      out.replace(pos, end - pos + 1, v);
+      pos += std::strlen(v);
+    } else {
+      pos = end + 1;
+    }
+  }
+  return out;
 }
 
 std::string trimLeft(const std::string& s) {
@@ -59,6 +86,9 @@ ToolDefinition makeSqlQueryTool(const std::string& configuredDbPath) {
           return nlohmann::json{{"content", "(sql_query failed: %APPDATA% not set)"}};
         }
       }
+      // Resolve %VAR% (e.g. "%APPDATA%\VRCX\VRCX.sqlite3") in the AGENT
+      // environment - the sandbox user's %APPDATA% points at ITS profile.
+      path = expandEnv(path);
 
       const std::string sql = trimLeft(args.value("sql", ""));
       if (sql.empty()) {

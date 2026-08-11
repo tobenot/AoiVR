@@ -20,6 +20,13 @@
 
 namespace aoi {
 
+// Forward declaration in the DIRECT aoi scope (NOT inside the anonymous
+// namespace below): the anonymous namespace's implicit using-directive would
+// otherwise create a second same-named entity and make every call ambiguous.
+// Defined below; used by runSandboxSetup for the wide-char setup path/args
+// (the ANSI module path is GBK on CJK systems - never byte-widen it).
+std::wstring sandboxWorkspacePathW();
+
 namespace {
 
 // The sandbox capability SID: a random S-1-5-21-<a>-<b>-<c>-<d> (domain-form
@@ -46,6 +53,18 @@ std::string g_privateDesktop;         // unused (documented above)
 // it to LogonUser + CreateRestrictedToken + CreateProcessAsUser.
 std::string g_sandboxPassword;
 bool g_credsReady = false;
+
+// Serializes the whole sandbox chain (ensure/credentials/execute): concurrent
+// callers exist (hook scheduler thread + agent worker threads) and the ensure
+// path can launch an elevated setup - without the lock two threads could run
+// setup concurrently (double UAC), race the password rotation, or tear the
+// global capSid while another thread reads it.
+std::mutex g_sandboxMutex;
+
+// Directories granted read+execute to the sandbox user at startup (registered
+// from aoi_config.json "sandbox.read_dirs"). Guarded by g_sandboxMutex (set
+// once at agent start, read in ensureSandboxReady).
+std::vector<std::string> g_sandboxReadDirs;
 
 // ---- base64 decode (for the DPAPI blob in the secrets file) ----
 bool b64Decode(const std::string& in, std::string* out) { return Base64::Decode(in, out); }
@@ -88,18 +107,19 @@ std::wstring utf8ToWide(const std::string& s) {
 // Launch aoi-sandbox-setup.exe elevated (UAC). Returns true when setup
 // completed successfully.
 bool runSandboxSetup() {
-  char exeDir[MAX_PATH]{};
-  DWORD n = GetModuleFileNameA(nullptr, exeDir, MAX_PATH);
-  std::string dir;
-  if (n > 0) {
-    dir = exeDir;
-    const size_t slash = dir.find_last_of("\\/");
-    if (slash != std::string::npos) dir = dir.substr(0, slash + 1);
-  }
-  const std::string setupPath = dir + "aoi-sandbox-setup.exe";
-  if (GetFileAttributesA(setupPath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+  // Wide path from GetModuleFileNameW: the ANSI variant returns GBK bytes on
+  // CJK systems and utf8ToWide (which expects UTF-8) would produce mojibake -
+  // ShellExecuteExW would fail to find the setup exe, setup would never run,
+  // and EVERY later tool call would re-trigger UAC forever ("一直提权").
+  wchar_t exeBuf[MAX_PATH]{};
+  if (GetModuleFileNameW(nullptr, exeBuf, MAX_PATH) == 0) return false;
+  std::wstring dir(exeBuf);
+  const size_t slash = dir.find_last_of(L"\\/");
+  if (slash != std::wstring::npos) dir = dir.substr(0, slash + 1);
+  const std::wstring setupPath = dir + L"aoi-sandbox-setup.exe";
+  if (GetFileAttributesW(setupPath.c_str()) == INVALID_FILE_ATTRIBUTES) return false;
 
-  // Real user SID (for .sandbox-secrets ACL).
+  // Real user SID (for .sandbox-secrets ACL). Pure ASCII, safe to widen.
   std::string userSidStr;
   {
     HANDLE tok = nullptr;
@@ -120,19 +140,22 @@ bool runSandboxSetup() {
   }
   if (userSidStr.empty()) return false;
 
-  const std::string workdir = sandboxWorkspacePath().substr(
-      0, sandboxWorkspacePath().size() - std::string("sandbox").size());
-  const std::string args = "\"" + setupPath + "\" \"" + workdir + "\" \"" +
-                           userSidStr + "\"";
-  const std::wstring argsW(args.begin(), args.end());
-  const std::wstring setupW = utf8ToWide(setupPath);
+  const std::wstring workdir = sandboxWorkspacePathW().substr(
+      0, sandboxWorkspacePathW().size() - std::wstring(L"sandbox").size());
+  const std::wstring sidW = utf8ToWide(userSidStr);
+  // ShellExecuteExW appends lpParameters to lpFile to build the command line,
+  // so lpParameters must NOT repeat the exe path: "setup setup <workdir> <sid>"
+  // would shift setup's argv (workdir=exe path, SID=workdir) and every setup
+  // run would fail (secureSecretsDir with a bad SID, err log written to a
+  // garbage path) - and each later tool call would re-trigger UAC forever.
+  const std::wstring args = L"\"" + workdir + L"\" \"" + sidW + L"\"";
 
   SHELLEXECUTEINFOW sei{};
   sei.cbSize = sizeof(sei);
   sei.fMask = SEE_MASK_NOCLOSEPROCESS;
   sei.lpVerb = L"runas";
-  sei.lpFile = setupW.c_str();
-  sei.lpParameters = argsW.c_str();
+  sei.lpFile = setupPath.c_str();
+  sei.lpParameters = args.c_str();
   sei.nShow = SW_HIDE;
   if (!ShellExecuteExW(&sei) || !sei.hProcess) return false;
   WaitForSingleObject(sei.hProcess, INFINITE);
@@ -470,6 +493,26 @@ void ensureSandboxReady() {
       if (!applyAceToPath(sysSkills, DENY_ACCESS, FILE_ALL_ACCESS,
                           reinterpret_cast<PSID>(userSid.data())))
         std::fprintf(stderr, "[Sandbox] WARNING: DENY sandbox/skills failed, err=%lu\n", GetLastError());
+      // VRCX companion database (VRChat auth session store used by the
+      // sql_query tool) lives under the REAL user's profile (%APPDATA%\VRCX),
+      // whose ACL grants no read to the sandbox user by default - sqlite3
+      // would fail with "unable to open database file". Grant the sandbox
+      // user READ+EXECUTE on the VRCX directory (inherited by the db file),
+      // mirroring how Codex opens AppData to its CodexSandboxUsers group.
+      // The agent runs as the real user, so this needs no elevation.
+      {
+        const char* appdata = std::getenv("APPDATA");
+        if (appdata && *appdata) {
+          const std::string vrcx = std::string(appdata) + "\\VRCX";
+          if (GetFileAttributesA(vrcx.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (!applyAceToPath(vrcx, SET_ACCESS,
+                                FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+                                reinterpret_cast<PSID>(userSid.data())))
+              std::fprintf(stderr, "[Sandbox] WARNING: VRCX read grant failed, err=%lu\n",
+                           GetLastError());
+          }
+        }
+      }
       // The sandbox workspace must be writable by the sandbox user: the
       // workdir protection above rebuilds the parent ACL as read-only for
       // Users/Authenticated Users, and new files in sandbox/ would inherit
@@ -480,6 +523,31 @@ void ensureSandboxReady() {
                               FILE_GENERIC_EXECUTE | DELETE,
                           reinterpret_cast<PSID>(userSid.data())))
         std::fprintf(stderr, "[Sandbox] WARNING: applyAceToPath(workspace user allow) failed, err=%lu\n", GetLastError());
+      // Registered read dirs (aoi_config.json "sandbox.read_dirs"): grant the
+      // sandbox user READ+EXECUTE (inherited) so shipped knowledge files
+      // outside the sandbox workspace are readable by the model. Relative
+      // entries resolve against the agent exe dir. Applied once per launch
+      // (idempotent ACE).
+      for (const auto& rd : g_sandboxReadDirs) {
+        std::string dir = rd;
+        if (dir == "." || dir.rfind(".\\", 0) == 0 || dir.rfind("./", 0) == 0) {
+          dir = workdir + dir.substr(1);  // "<exeDir>" + rest
+        } else if (dir.find(':') == std::string::npos &&
+                   dir.find("\\\\") != 0) {
+          dir = workdir + dir;  // relative -> exeDir
+        }
+        if (GetFileAttributesA(dir.c_str()) == INVALID_FILE_ATTRIBUTES) {
+          std::fprintf(stderr,
+                       "[Sandbox] WARNING: read_dirs entry not found, skipped: %s\n",
+                       dir.c_str());
+          continue;
+        }
+        if (!applyAceToPath(dir, SET_ACCESS,
+                            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+                            reinterpret_cast<PSID>(userSid.data())))
+          std::fprintf(stderr, "[Sandbox] WARNING: read_dirs grant failed: %s err=%lu\n",
+                       dir.c_str(), GetLastError());
+      }
       // Workdir write protection: the sandbox user inherits Authenticated
       // Users / Users modify rights on the agent directory (common on D:
       // drives), which would let the model write anywhere next to the agent
@@ -597,6 +665,12 @@ bool createRestrictedToken(HANDLE* outToken) {
 
 } // namespace
 
+// Registered in the DIRECT aoi scope (declared in windows_sandbox.hpp).
+void setSandboxReadDirs(const std::vector<std::string>& dirs) {
+  std::lock_guard<std::mutex> lk(g_sandboxMutex);
+  g_sandboxReadDirs = dirs;
+}
+
 // Wide-char variants used by the CreateProcessWithLogonW path: the ANSI
 // module path is GBK on CJK systems and must never be byte-widened.
 std::wstring sandboxWorkspacePathW() {
@@ -645,13 +719,6 @@ std::string sandboxExecute(const std::string& opJson) {
   }
 }
 
-// Serializes the whole sandbox chain (ensure/credentials/execute): concurrent
-// callers exist (hook scheduler thread + agent worker threads) and the ensure
-// path can launch an elevated setup - without the lock two threads could run
-// setup concurrently (double UAC), race the password rotation, or tear the
-// global capSid while another thread reads it.
-std::mutex g_sandboxMutex;
-
 std::string sandboxExecuteInner(const std::string& opJson) {
   std::lock_guard<std::mutex> lk(g_sandboxMutex);
   ensureSandboxReady();
@@ -694,8 +761,10 @@ std::string sandboxExecuteInner(const std::string& opJson) {
   // produces mojibake (CreateProcessWithLogonW would fail on any non-ASCII
   // install path).
   const std::wstring wsSandboxW = sandboxWorkspacePathW();
+  const std::wstring exeDirW = wsSandboxW.substr(
+      0, wsSandboxW.size() - std::wstring(L"sandbox").size());
   std::wstring cmdLine = L"\"" + helperW + L"\" \"" + wsSandboxW + L"\" \"" +
-                         utf8ToWide(g_capSidStr) + L"\"";
+                         utf8ToWide(g_capSidStr) + L"\" \"" + exeDirW + L"\"";
 
   STARTUPINFOW si{};
   si.cb = sizeof(si);

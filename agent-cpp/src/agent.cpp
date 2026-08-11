@@ -14,6 +14,7 @@
 #include "base64.hpp"
 #include "builtin_tools.hpp"
 #include "convert_tools.hpp"
+#include "fetch_tools.hpp"
 #include "hook_tools.hpp"
 #include "image_utils.hpp"
 #include "prompts.hpp"
@@ -21,6 +22,7 @@
 #include "skills.hpp"
 #include "sqlite_tools.hpp"
 #include "system_control.hpp"
+#include "windows_sandbox.hpp"
 namespace aoi {
 
 namespace {
@@ -223,6 +225,10 @@ bool AoiAgent::start() {
   // writable inside the sandbox).
   ensureSkillDirs(agentExeDir() + "sandbox\\skills",
                   agentExeDir() + "sandbox\\skills_user");
+  // Register sandbox read dirs from aoi_config.json ("sandbox.read_dirs");
+  // granted to the sandbox user on the next sandbox call (shipped knowledge
+  // files outside the sandbox workspace become readable by the model).
+  setSandboxReadDirs(fileConfig_.sandboxReadDirs);
   const ToolRegistry registry =
       loadRegistries(workDir_ + "\\system_registry.json",
                      agentExeDir() + "sandbox\\user_registry.json");
@@ -590,11 +596,46 @@ void AoiAgent::stopAndProcess() {
 
   std::vector<ContentPart> parts;
   // Audio block: MiMo input_audio format (data:{MIME};base64,... prefix kept).
+  // Downsample 16k -> 8k BEFORE sending: halves the base64 payload (~96KB ->
+  // 48KB per 3s of speech), which halves the per-turn prompt-cache miss caused
+  // by audio folding in history (the folded placeholder replaces the raw
+  // base64 in the cache key; smaller payload = smaller cache break). 8k 16-bit
+  // mono stays intelligible for speech.
+  const std::vector<uint8_t>& rawWav = result.wavBuffer;
+  std::vector<uint8_t> wav8;
+  const uint8_t* wavData = rawWav.data();
+  size_t wavLen = rawWav.size();
+  if (wavLen > 44) {
+    wav8.resize(44 + (wavLen - 44) / 2);
+    std::memcpy(wav8.data(), wavData, 44);
+    // Patch the header: sample rate 8000, byte rate 16000, data size halved.
+    const uint32_t dataSize8 = static_cast<uint32_t>((wavLen - 44) / 2);
+    const uint32_t riffSize8 = 36 + dataSize8;
+    auto put32 = [](uint8_t* p, uint32_t v) {
+      p[0] = static_cast<uint8_t>(v);
+      p[1] = static_cast<uint8_t>(v >> 8);
+      p[2] = static_cast<uint8_t>(v >> 16);
+      p[3] = static_cast<uint8_t>(v >> 24);
+    };
+    put32(&wav8[4], riffSize8);
+    put32(&wav8[24], 8000);   // sample rate
+    put32(&wav8[28], 16000);  // byte rate = 8000 * 1 ch * 2 bytes
+    put32(&wav8[40], dataSize8);
+    // Take every 2nd 16-bit sample (linear decimation of 16k -> 8k).
+    for (size_t i = 44, o = 44; i + 1 < wavLen; i += 4, o += 2) {
+      wav8[o] = wavData[i];
+      wav8[o + 1] = wavData[i + 1];
+    }
+    wavData = wav8.data();
+    wavLen = wav8.size();
+  }
   ContentPart audio;
   audio.type = "audio";
   audio.dataUrl = "data:audio/wav;base64," +
-                  base64Encode(result.wavBuffer.data(), result.wavBuffer.size());
+                  base64Encode(wavData, wavLen);
   parts.push_back(audio);
+  debug("[Agent] audio wav %zu -> %zu bytes (16k->8k)\n",
+        result.wavBuffer.size(), wavLen);
 
   std::string shotNote;
   if (!pendingShotPath_.empty()) {
@@ -699,6 +740,7 @@ AoiAgent::makeToolFactories() {
   f.emplace_back("write", [] { return makeWriteTool(); });
   f.emplace_back("sql_query", [this] { return makeSqlQueryTool(fileConfig_.vrcxDbPath); });
   f.emplace_back("convert", [] { return makeConvertTool(); });
+  f.emplace_back("fetch", [] { return makeFetchTool(); });
   f.emplace_back("screenshot", [this] { return makeScreenshotTool(); });
   f.emplace_back("system", [this] { return makeSystemTool(); });
   f.emplace_back("interpretation", [this] { return makeInterpretationTool(); });

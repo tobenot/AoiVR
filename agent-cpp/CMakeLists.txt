@@ -29,6 +29,7 @@ add_executable(aoi-agent
   src/builtin_tools.cpp
   src/sqlite_tools.cpp
   src/convert_tools.cpp
+  src/fetch_tools.cpp
   src/system_control.cpp
   src/llm_client.cpp
   src/agent_config.cpp
@@ -127,6 +128,7 @@ set(AOI_AGENT_SOURCES
   src/builtin_tools.cpp
   src/sqlite_tools.cpp
   src/convert_tools.cpp
+  src/fetch_tools.cpp
   src/system_control.cpp
   src/llm_client.cpp
   src/agent_config.cpp
@@ -221,6 +223,7 @@ target_link_libraries(aoi-sandbox-setup PRIVATE
   advapi32
   crypt32
   netapi32
+  userenv
 )
 if(MSVC)
   target_compile_options(aoi-sandbox-setup PRIVATE /utf-8 /permissive-)
@@ -326,6 +329,19 @@ if(MSVC)
   target_compile_options(aoi-llm-tests PRIVATE /utf-8 /permissive-)
 endif()
 target_link_libraries(aoi-llm-tests PRIVATE CURL::libcurl ws2_32)
+
+# Dev tool: prompt-cache hit sequence measurement (long-text turns).
+add_executable(aoi-cache-lab
+  tests/cache_lab.cpp
+  src/base64.cpp
+  src/http_client.cpp
+  src/llm_client.cpp
+)
+target_include_directories(aoi-cache-lab PRIVATE src third_party third_party/nlohmann third_party/base64)
+if(MSVC)
+  target_compile_options(aoi-cache-lab PRIVATE /utf-8 /permissive-)
+endif()
+target_link_libraries(aoi-cache-lab PRIVATE CURL::libcurl ws2_32)
 
 add_executable(aoi-dll-tests
   tests/dll_test.cpp

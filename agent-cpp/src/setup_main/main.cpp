@@ -20,12 +20,14 @@
 #include <aclapi.h>
 #include <lm.h>
 #include <ntsecapi.h>
+#include <userenv.h>
 #include <ntstatus.h>
 #include <sddl.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <filesystem>
 #include <random>
 #include <string>
 #include <vector>
@@ -96,9 +98,81 @@ std::string dpapiEncrypt(const std::string& plain) {
   return b64;
 }
 
-// Create the sandbox user (idempotent, password rotated on rerun) and add it
-// to the Users group (base compatibility - full-disk read requires it).
-bool provisionUsers(const std::string& password) {
+// base64 decode (RFC 4648, standard alphabet, tolerant of padding).
+std::string b64Decode(const std::string& in) {
+  auto val = [](char c) -> int {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+  };
+  std::string out;
+  int acc = 0, bits = 0;
+  for (const char c : in) {
+    if (c == '=' || c == '\r' || c == '\n') continue;
+    const int v = val(c);
+    if (v < 0) return {};
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push_back(static_cast<char>((acc >> bits) & 0xFF));
+    }
+  }
+  return out;
+}
+
+// DPAPI (machine-level) decrypt.
+std::string dpapiDecrypt(const std::string& b64) {
+  const std::string blob = b64Decode(b64);
+  if (blob.empty()) return {};
+  DATA_BLOB in{static_cast<DWORD>(blob.size()),
+               reinterpret_cast<BYTE*>(const_cast<char*>(blob.data()))};
+  DATA_BLOB out{};
+  if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, 0, &out))
+    return {};
+  std::string plain(reinterpret_cast<char*>(out.pbData), out.cbData);
+  LocalFree(out.pbData);
+  return plain;
+}
+
+// Read the existing secrets file and decrypt the stored password ("" when
+// absent/undecryptable) - reused across setup reruns so packages sharing the
+// sandbox user never invalidate each other.
+std::string existingPassword(const std::string& workdir) {
+  const std::string file = workdir + "\\" + kSecretsDir + "\\" + kSecretsFile;
+  std::ifstream f(file, std::ios::binary);
+  if (!f) return {};
+  std::string content((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+  const size_t p = content.find("\"password_b64\":\"");
+  if (p == std::string::npos) return {};
+  const size_t start = p + 16;
+  const size_t end = content.find('"', start);
+  if (end == std::string::npos) return {};
+  return dpapiDecrypt(content.substr(start, end - start));
+}
+
+// True when the password still logs the sandbox user in.
+bool passwordValid(const std::string& password) {
+  if (password.empty()) return false;
+  const std::wstring passW = utf8ToWide(password);
+  HANDLE logon = nullptr;
+  const BOOL ok = LogonUserW(kUserName, L".", passW.c_str(),
+                             LOGON32_LOGON_INTERACTIVE,
+                             LOGON32_PROVIDER_DEFAULT, &logon);
+  if (ok) CloseHandle(logon);
+  return ok != FALSE;
+}
+
+// Create the sandbox user (idempotent) and add it to the Users group (base
+// compatibility - full-disk read requires it). When `setPassword` is false
+// and the user already exists, the password is NOT rotated: several packages
+// share the single sandbox user, and rotating on every setup run would
+// invalidate the other packages' secrets files ("一直提权" loop).
+bool provisionUsers(const std::string& password, bool setPassword) {
   const std::wstring passW = utf8ToWide(password);
   USER_INFO_1 ui1{};
   ui1.usri1_name = const_cast<LPWSTR>(kUserName);
@@ -108,11 +182,13 @@ bool provisionUsers(const std::string& password) {
   ui1.usri1_script_path = nullptr;
   NET_API_STATUS rc = NetUserAdd(nullptr, 1, reinterpret_cast<LPBYTE>(&ui1), nullptr);
   if (rc == NERR_UserExists) {
-    USER_INFO_1003 ui1003{};
-    ui1003.usri1003_password = ui1.usri1_password;
-    rc = NetUserSetInfo(nullptr, kUserName, 1003,
-                        reinterpret_cast<LPBYTE>(&ui1003), nullptr);
-    if (rc != NERR_Success) return false;
+    if (setPassword) {
+      USER_INFO_1003 ui1003{};
+      ui1003.usri1003_password = ui1.usri1_password;
+      rc = NetUserSetInfo(nullptr, kUserName, 1003,
+                          reinterpret_cast<LPBYTE>(&ui1003), nullptr);
+      if (rc != NERR_Success) return false;
+    }
   } else if (rc != NERR_Success) {
     return false;
   }
@@ -353,13 +429,21 @@ int main(int argc, char** argv) {
   }
 
   const std::wstring wWorkdir = utf8ToWide(workdir);
-  const std::string password = randomPassword();
 
-  if (!provisionUsers(password)) {
+  // Reuse the existing password when it still works: several packages share
+  // the single sandbox user, and rotating on every rerun would invalidate
+  // the other packages' secrets ("一直提权" loop). Only rotate when absent
+  // or stale.
+  std::string password = existingPassword(workdir);
+  const bool setPassword = !passwordValid(password);
+  if (setPassword) password = randomPassword();
+
+  if (!provisionUsers(password, setPassword)) {
     logSetupError(workdir, "provisionUsers failed");
     return 3;
   }
-  logSetupError(workdir, "provisionUsers ok");
+  logSetupError(workdir, setPassword ? "provisionUsers ok (password rotated)"
+                                     : "provisionUsers ok (password reused)");
   if (!grantSandboxPrivileges()) {
     logSetupError(workdir, "grantSandboxPrivileges failed");
     return 10;
@@ -396,6 +480,66 @@ int main(int argc, char** argv) {
     }
   }
   logSetupError(workdir, "secrets written + secured");
+
+  // Initialize the sandbox user's profile COMPLETELY. CreateProcessWithLogonW's
+  // LOGON_WITH_PROFILE on a freshly-created user leaves an EMPTY profile dir
+  // (no NTUSER.DAT) and HKU mounts a temporary hive; schannel then fails in
+  // WRITE_RESTRICTED children with SEC_E_NO_CREDENTIALS (no per-user cert
+  // store to open). LoadUserProfile here - with SeRestore/SeBackup ENABLED on
+  // the elevated token (LoadUserProfile requires them; "merely impersonating
+  // an administrator is not sufficient" - MS Learn) - creates the real
+  // NTUSER.DAT + directory skeleton; later logons mount it and TLS works.
+  {
+    // 1) Enable the required privileges on OUR token (present but disabled).
+    HANDLE self = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(),
+                         TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &self)) {
+      const auto enable = [self](const char* name) {
+        TOKEN_PRIVILEGES tp{};
+        tp.PrivilegeCount = 1;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (LookupPrivilegeValueA(nullptr, name, &tp.Privileges[0].Luid))
+          AdjustTokenPrivileges(self, FALSE, &tp, 0, nullptr, nullptr);
+      };
+      enable("SeRestorePrivilege");
+      enable("SeBackupPrivilege");
+      CloseHandle(self);
+    }
+
+    // 2) Only rebuild when the profile is missing/broken (no NTUSER.DAT).
+    const std::wstring profileDir = L"C:\\Users\\" + std::wstring(kUserName);
+    std::error_code pec;
+    const bool needProfile =
+        !std::filesystem::exists(profileDir + L"\\NTUSER.DAT", pec);
+    if (needProfile) {
+      // Best-effort removal of the empty/partial dir so LoadUserProfile
+      // creates a complete one (fails silently if a session still holds it).
+      std::error_code rec;
+      std::filesystem::remove_all(profileDir, rec);
+      HANDLE logon = nullptr;
+      if (LogonUserW(kUserName, L".", utf8ToWide(password).c_str(),
+                     LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
+                     &logon)) {
+        PROFILEINFOW pi{};
+        pi.dwSize = sizeof(pi);
+        wchar_t uname[] = L"AoiSandboxUser";
+        pi.lpUserName = uname;
+        if (LoadUserProfileW(logon, &pi)) {
+          logSetupError(workdir, "LoadUserProfile ok (profile created)");
+          UnloadUserProfile(logon, pi.hProfile);
+        } else {
+          logSetupError(workdir, "LoadUserProfile failed: err=" +
+                                     std::to_string(GetLastError()));
+        }
+        CloseHandle(logon);
+      } else {
+        logSetupError(workdir, "LogonUser for profile failed");
+      }
+    } else {
+      logSetupError(workdir, "profile already complete (NTUSER.DAT present)");
+    }
+  }
+
   printf("sandbox setup complete\n");
   return 0;
 }

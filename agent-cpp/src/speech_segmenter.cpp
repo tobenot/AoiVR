@@ -219,11 +219,17 @@ void SpeechSegmenter::handleSegment(std::vector<uint8_t> pcm, int startSample) {
 void SpeechSegmenter::transcribeAsync(const SpeechSegment& seg) {
   // Bound the worker backlog: each segment spawns a thread stored in
   // workers_ (only joined at stop), so a long session would accumulate
-  // threads and OS handles forever. When the backlog is full, process the
-  // segment synchronously instead of spawning another worker.
+  // threads and OS handles forever. Count LIVE workers (completed ones are
+  // removed) - a size-only check would permanently fall through to the
+  // synchronous path after the first kMax workers finished. When the backlog
+  // is full, process the segment synchronously instead of spawning another
+  // worker.
+  bool spawned = false;
   {
     std::lock_guard<std::mutex> lk(workersMutex_);
-    if (workers_.size() < kMaxTranscribeWorkers) {
+    if (activeWorkers_ < kMaxTranscribeWorkers) {
+      ++activeWorkers_;
+      spawned = true;
       workers_.emplace_back([this, seg]() {
         if (!active_.load()) return;
 #ifdef AOI_USE_SHERPA
@@ -239,10 +245,16 @@ void SpeechSegmenter::transcribeAsync(const SpeechSegment& seg) {
         // No sherpa: emit the segment without transcription (audio understanding path).
         if (opts_.onSegment) opts_.onSegment(seg);
 #endif
+        // Decrement the live count on a separate thread-safe path: joining
+        // ourselves (e.g. if the callback triggered stop()) would deadlock.
+        {
+          std::lock_guard<std::mutex> lk2(workersMutex_);
+          if (activeWorkers_ > 0) --activeWorkers_;
+        }
       });
-      return;
     }
   }
+  if (spawned) return;
   // Backlog full: synchronous fallback (same path the worker would take).
   if (opts_.onSegment) opts_.onSegment(seg);
 }
@@ -260,11 +272,17 @@ void SpeechSegmenter::stop() {
     vad_ = nullptr;
   }
 #endif
-  std::lock_guard<std::mutex> lk(workersMutex_);
-  for (auto& t : workers_) {
+  // Move the threads out under the lock, then join OUTSIDE it: a worker whose
+  // onSegment callback re-enters stop() would otherwise self-join (deadlock).
+  std::vector<std::thread> local;
+  {
+    std::lock_guard<std::mutex> lk(workersMutex_);
+    local.swap(workers_);
+    activeWorkers_ = 0;
+  }
+  for (auto& t : local) {
     if (t.joinable()) t.join();
   }
-  workers_.clear();
   if (opts_.onState) opts_.onState("stopped", "");
 }
 

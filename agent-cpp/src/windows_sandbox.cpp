@@ -389,10 +389,14 @@ bool protectWorkdir(const std::string& workdir) {
   BYTE sysBuf[68]{}, adminsBuf[68]{};
   {
     DWORD l1 = sizeof(sysBuf), l2 = sizeof(adminsBuf);
-    CreateWellKnownSid(WinLocalSystemSid, nullptr,
-                       reinterpret_cast<PSID>(sysBuf), &l1);
-    CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr,
-                       reinterpret_cast<PSID>(adminsBuf), &l2);
+    // A failed CreateWellKnownSid leaves a zeroed SID; feeding that into the
+    // ACL would corrupt the DACL. Fail closed instead.
+    if (!CreateWellKnownSid(WinLocalSystemSid, nullptr,
+                            reinterpret_cast<PSID>(sysBuf), &l1) ||
+        !CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr,
+                            reinterpret_cast<PSID>(adminsBuf), &l2)) {
+      return false;
+    }
   }
   PSID authUsers = nullptr;
   PSID users = nullptr;

@@ -364,6 +364,7 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
 
     std::string buffer;  // SSE line buffer, scoped to this request
     std::string rawBody;  // full raw response, captured for error diagnostics
+    bool sawTerminal = false;  // saw [DONE] or a non-empty finish_reason
     const auto res = http_.postStream(url, headers, req.dump(), [&](const char* data, size_t len) {
     rawBody.append(data, len);
     buffer.append(data, len);    size_t pos;
@@ -372,7 +373,16 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
       buffer.erase(0, pos + 1);
       if (!line.empty() && line.back() == '\r') line.pop_back();
       if (line.empty()) continue;
-      if (line == "data: [DONE]") { finishReason = "stop"; continue; }
+      // Accept both "data: [DONE]" and "data:[DONE]" spellings.
+      if (line.rfind("data:", 0) == 0) {
+        std::string payload = line.substr(5);
+        if (!payload.empty() && payload.front() == ' ') payload.erase(0, 1);
+        if (payload == "[DONE]") {
+          finishReason = "stop";
+          sawTerminal = true;
+          continue;
+        }
+      }
       const std::string prefix = "data: ";
       if (line.rfind(prefix, 0) != 0) continue;
       try {
@@ -404,8 +414,9 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
         const bool hasDelta = first.contains("delta") && first["delta"].is_object();
         // finish_reason lives INSIDE choices[0] for OpenAI-compatible streams;
         // the top-level json["finish_reason"] is almost never set.
-        if (first.contains("finish_reason") && !first["finish_reason"].is_null()) {
+        if (first.contains("finish_reason") && first["finish_reason"].is_string()) {
           finishReason = first["finish_reason"].get<std::string>();
+          sawTerminal = true;
         }
         if (hasDelta) {
           const auto& delta = first["delta"];
@@ -483,11 +494,20 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
     bool shouldRetry = false;
     int delayMs = 0;
     const char* retryLayer = nullptr;
-    // Mid-stream break: HTTP 200 headers received but the connection died
-    // before the body completed (curl reports a non-OK code). The partial
-    // response must NEVER be presented as the final answer - retry it like a
-    // transport failure.
-    if (res.status > 0 && res.curlCode != CURLE_OK) {
+    // A clean TCP close WITHOUT the [DONE] sentinel or any finish_reason is a
+    // truncated response: never present the partial text as the final answer.
+    if (res.status > 0 && res.curlCode == CURLE_OK && !sawTerminal) {
+      log("[LLM] stream ended without [DONE]/finish_reason (truncated); retrying");
+      delayMs = 2000 * (1 << streamAttempts);
+      delayMs = (std::min)(delayMs, 30000);
+      ++streamAttempts;
+      retryLayer = "stream";
+      shouldRetry = true;
+    } else if (res.status > 0 && res.curlCode != CURLE_OK) {
+      // Mid-stream break: HTTP 200 headers received but the connection died
+      // before the body completed (curl reports a non-OK code). The partial
+      // response must NEVER be presented as the final answer - retry it like a
+      // transport failure.
       log("[LLM] mid-stream break: status=" + std::to_string(res.status) +
           " curl=" + std::to_string(res.curlCode) + " error=" + res.error);
       if (streamRetryable(res)) {
@@ -501,8 +521,7 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
         log("[LLM] mid-stream break (not retryable); aborting turn");
         return false;
       }
-    }
-    if (res.status >= 400) {
+    } else if (res.status >= 400) {
       const bool retryableStatus = res.status == 429 || (res.status >= 500 && res.status <= 599);
       if (retryableStatus && executorAttempts < kExecutorMaxRetries) {
         delayMs = retryAfterMs(res.headers);
@@ -544,6 +563,9 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
     }
 
     if (shouldRetry) {
+      // Floor the delay: a 0/negative Retry-After would spin a zero-delay
+      // hot loop that never consumes the retry budget.
+      if (delayMs < 500) delayMs = 500;
       if (retryWaitedMs + delayMs > kRetryBudgetMs) {
         log("[LLM] retry wait budget exhausted (" + std::to_string(kRetryBudgetMs) +
             "ms); aborting turn");
@@ -753,6 +775,10 @@ void LlmSession::maybeCompressHistory() {
     history_.clear();
     history_.push_back(std::move(sumMsg));
     log("[LLM] history compressed: old history replaced by summary");
+    // Persist the compressed history so the disk file doesn't keep growing
+    // with the pre-compression messages (restart would otherwise resurrect
+    // them and the compression would be wasted).
+    persistHistory();
   } else {
     // Summarizer failed (network / too long): degrade by keeping only the
     // newest messages so the request still fits the window. Trim at complete
@@ -765,23 +791,28 @@ void LlmSession::maybeCompressHistory() {
 
 // Trim history down to at most `max` messages, cutting at user-message
 // boundaries so an assistant(tool_calls) is never dropped while its tool
-// response stays behind.
+// response stays behind. The cut lands on the FIRST user message at/after
+// `excess` - keeping at most `max` messages after it.
 void LlmSession::trimHistoryToMax(size_t max) {
   if (history_.size() <= max) return;
   const size_t excess = history_.size() - max;
-  size_t cut = 0;
-  for (size_t i = 0; i < excess; ++i) {
-    if (history_[i].role == "user") cut = i + 1;
+  size_t cut = history_.size();
+  for (size_t i = excess; i < history_.size(); ++i) {
+    if (history_[i].role == "user") { cut = i; break; }
   }
-  if (cut == 0) {
-    for (size_t i = 0; i < history_.size(); ++i) {
-      if (history_[i].role == "user") { cut = i; break; }
+  if (cut == history_.size()) {
+    // No user message in the kept region: fall back to cutting after the last
+    // user message before it, or plain trimming when there are no user
+    // messages at all (pure system/tool tail).
+    for (size_t i = history_.size(); i-- > 0;) {
+      if (history_[i].role == "user") { cut = i + 1; break; }
     }
+    if (cut == history_.size()) cut = excess;
   }
   if (cut > 0) {
     history_.erase(history_.begin(), history_.begin() + cut);
   } else {
-    history_.erase(history_.begin(), history_.begin() + (history_.size() - max));
+    history_.erase(history_.begin(), history_.begin() + excess);
   }
 }
 

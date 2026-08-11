@@ -1,4 +1,4 @@
-#include "agent.hpp"
+﻿#include "agent.hpp"
 
 #include <windows.h>
 
@@ -284,6 +284,12 @@ bool AoiAgent::start() {
     // so the C ABI never sees an exception crossing the extern "C" boundary.
     debug("[Agent] start() failed: %s\n", ex.what());
     running_ = false;
+    // Clean up whatever already started: the hook scheduler thread captures
+    // `this`, so it MUST be stopped before the object dies. stop() early-
+    // returns once running_ is false, so clean up components directly.
+    if (hookScheduler_) hookScheduler_->stop();
+    if (msgThread_.joinable()) msgThread_.join();
+    joinWorkers();
     return false;
   }
 }
@@ -573,20 +579,36 @@ void AoiAgent::startRecording() {
 void AoiAgent::stopAndProcess() {
   if (busy_) return;
   busy_ = true;
+  // RAII: reset busy_ on EVERY exit path (exceptions included), so a failed
+  // turn never permanently wedges the agent into refusing input/recording.
+  struct BusyGuard {
+    bool& flag;
+    ~BusyGuard() { flag = false; }
+  } guard{busy_};
 
   MicResult result = mic_.stop();
   if (result.wavBuffer.size() <= 44) {
     debug("[Agent] No audio captured\n");
     pendingShotPath_.clear();
-    busy_ = false;
     return;
   }
 
-  const double durationSec = static_cast<double>(result.wavBuffer.size() - 44) / (16000.0 * 2);
+  // Duration from the actual WAV header (sample rate at offset 24, channels
+  // at 22) - NOT a hardcoded 16k-mono assumption (32k stereo would be off by
+  // 4x and silently drop short sentences).
+  const std::vector<uint8_t>& rawWavHdr = result.wavBuffer;
+  const uint32_t rate = static_cast<uint32_t>(rawWavHdr[24]) |
+                        (static_cast<uint32_t>(rawWavHdr[25]) << 8) |
+                        (static_cast<uint32_t>(rawWavHdr[26]) << 16) |
+                        (static_cast<uint32_t>(rawWavHdr[27]) << 24);
+  const uint16_t ch = static_cast<uint16_t>(rawWavHdr[22]) |
+                      (static_cast<uint16_t>(rawWavHdr[23]) << 8);
+  const double byteRate = static_cast<double>(rate) * ch * 2;
+  const double durationSec =
+      byteRate > 0 ? static_cast<double>(rawWavHdr.size() - 44) / byteRate : 0.0;
   if (durationSec < 0.3) {
     debug("[Agent] Recording too short (%.2fs), ignoring\n", durationSec);
     pendingShotPath_.clear();
-    busy_ = false;
     return;
   }
 
@@ -595,6 +617,7 @@ void AoiAgent::stopAndProcess() {
   sentenceBuffer_.clear();
   sawAnyTextDelta_ = false;
   finalSent_ = false;
+  fullResponse_.clear();
 
   std::vector<ContentPart> parts;
   // Audio block: MiMo input_audio format (data:{MIME};base64,... prefix kept).
@@ -630,9 +653,13 @@ void AoiAgent::stopAndProcess() {
         if (f) {
           mp3.assign((std::istreambuf_iterator<char>(f)),
                      std::istreambuf_iterator<char>());
-          audioData = mp3.data();
-          audioLen = mp3.size();
-          mime = "audio/mpeg";
+          // Guard: an empty read would make mp3.data() a nullptr into
+          // base64Encode (UB). Only switch to mp3 when there is data.
+          if (mp3.size() > 0) {
+            audioData = mp3.data();
+            audioLen = mp3.size();
+            mime = "audio/mpeg";
+          }
         }
         std::error_code ec;
         std::filesystem::remove(mp3Path, ec);
@@ -714,7 +741,6 @@ void AoiAgent::stopAndProcess() {
   }
 
   pendingShotPath_.clear();
-  busy_ = false;
 }
 
 // Combine the base system prompt with the user-editable AGENTS.md content.
@@ -774,6 +800,7 @@ void AoiAgent::handleUserInput(const Message& msg) {
   sentenceBuffer_.clear();
   sawAnyTextDelta_ = false;
   finalSent_ = false;
+  fullResponse_.clear();
   sendTuiFeed(std::string(ANSI_YELLOW) + "YOU:" + ANSI_RESET + " " + text + "\n\n");
   send(MessageType::ProcessingStage,
        nlohmann::json{{"stage", "understand"}, {"thought", "正在理解你的问题…"}});
@@ -1460,7 +1487,10 @@ bool AoiAgent::startInterpretation(const std::string& targetLang) {
     debug("[Interp] Already running\n");
     return true;
   }
-  targetLang_ = targetLang.empty() ? "中文" : targetLang;
+  {
+    std::lock_guard<std::mutex> lk(targetLangMutex_);
+    targetLang_ = targetLang.empty() ? "中文" : targetLang;
+  }
   interpActive_ = true;
   nextSeqToSend_ = 1;
   ++interpGeneration_;  // invalidate any in-flight translations from a prior session
@@ -1599,7 +1629,7 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
     // chat's (possibly high-effort) config.
     auto session = createSessionWithPrompt(TRANSLATOR_SYSTEM_PROMPT, "disabled", "low");
     const std::string promptText =
-        "请将以下文本翻译成" + targetLang_ + "。只输出译文，不要任何解释或前缀。\n\n" + text;
+        "请将以下文本翻译成" + currentTargetLang() + "。只输出译文，不要任何解释或前缀。\n\n" + text;
     std::shared_ptr<std::string> result = std::make_shared<std::string>();
     spawnWorker(std::thread([this, session, promptText, result, seq = seg.seq, gen, release]() {
       std::string out;
@@ -1629,7 +1659,7 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
   {
     std::lock_guard<std::mutex> lk(interpHistoryMutex_);
     if (seg.sliding && (!interpPrevTrans_.empty() || !interpPrevSrc_.empty())) {
-      promptText = "将这段语音翻译成" + targetLang_ + "，只输出译文，不要多余解释。\n";
+      promptText = "将这段语音翻译成" + currentTargetLang() + "，只输出译文，不要多余解释。\n";
       promptText += "上一段语音翻译结果和原文（用于补全本句截断内容）：\n";
       if (!interpPrevTrans_.empty()) promptText += "译文: " + interpPrevTrans_ + "\n";
       if (!interpPrevSrc_.empty()) promptText += "原文: " + interpPrevSrc_ + "\n";
@@ -1639,7 +1669,7 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
                     "3. 静音、噪音片段直接输出空；\n"
                     "4. 只输出本段新增的翻译内容，不要复述历史。";
     } else {
-      promptText = "将这段语音翻译成" + targetLang_ + "，只输出译文，不要多余解释。\n"
+      promptText = "将这段语音翻译成" + currentTargetLang() + "，只输出译文，不要多余解释。\n"
                    "背景音乐或噪音不影响翻译，只要有人声就必须翻译；"
                    "只有完全静音且没有任何人声时才输出空。";
     }
@@ -1762,7 +1792,7 @@ void AoiAgent::deliverTranslations() {
            nlohmann::json{{"text", trimmed}, {"seq", seq}, {"partial", false}});
       {
         std::lock_guard<std::mutex> lk(interpHistoryMutex_);
-        interpretationHistory_.push_back("[" + targetLang_ + "] " + trimmed);
+        interpretationHistory_.push_back("[" + currentTargetLang() + "] " + trimmed);
         if (interpretationHistory_.size() > 20) interpretationHistory_.erase(interpretationHistory_.begin());
       }
       debug("[Interp] #%d: %s\n", seq, trimmed.c_str());
@@ -1772,7 +1802,7 @@ void AoiAgent::deliverTranslations() {
 }
 
 bool AoiAgent::isSameLanguageAsTarget(const std::string& lang, const std::string& text) const {
-  std::string t = targetLang_;
+  std::string t = currentTargetLang();
   std::string src = lang;
   for (auto& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   for (auto& c : src) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

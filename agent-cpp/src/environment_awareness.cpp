@@ -53,7 +53,16 @@ std::vector<std::string> listFrameFiles(const std::string& dir) {
       out.push_back(name);
     }
   }
-  std::sort(out.begin(), out.end());
+  // Numeric sort by the sequence number in "frame_<n>": lexicographic order
+  // puts frame_10 BEFORE frame_9, so files.back() would return a stale frame.
+  std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+    auto num = [](const std::string& s) {
+      size_t i = s.find('_');
+      if (i == std::string::npos) return static_cast<unsigned long long>(0);
+      return strtoull(s.c_str() + i + 1, nullptr, 10);
+    };
+    return num(a) < num(b);
+  });
   return out;
 }
 
@@ -276,24 +285,29 @@ std::string EnvironmentAwareness::computeDiff(const std::string& prev,
   std::string w;
   // Match both ASCII and UTF-8 multi-byte CJK punctuation so the split works
   // under clang-cl (which rejects multi-byte char literals) and MSVC alike.
+  // Returns the separator length in bytes (1 for ASCII, 3 for CJK) or 0.
   size_t i = 0;
-  auto isSepAt = [&](const std::string &s, size_t pos) -> bool {
-    if (pos >= s.size()) return false;
+  auto sepLenAt = [&](const std::string& s, size_t pos) -> size_t {
+    if (pos >= s.size()) return 0;
     const unsigned char c = (unsigned char)s[pos];
-    if (c == ' ' || c == ',' || c == ';' || c == ':') return true;
-    if (pos + 2 >= s.size()) return false;
+    if (c == ' ' || c == ',' || c == ';' || c == ':') return 1;
+    if (pos + 2 >= s.size()) return 0;
     const unsigned char b1 = (unsigned char)s[pos + 1];
     const unsigned char b2 = (unsigned char)s[pos + 2];
     if (c == 0xEF && b1 == 0xBC)
-      return (b2 == 0x8C || b2 == 0x81 || b2 == 0x9A || b2 == 0x9F);  // ，！：？
+      return (b2 == 0x8C || b2 == 0x81 || b2 == 0x9A || b2 == 0x9F) ? 3 : 0;  // ，！：？
     if (c == 0xE3 && b1 == 0x80)
-      return (b2 == 0x82 || b2 == 0x81);  // 。、
-    return false;
+      return (b2 == 0x82 || b2 == 0x81) ? 3 : 0;  // 。、
+    return 0;
+  };
+  auto step = [&](const std::string& s, size_t pos) {
+    const size_t n = sepLenAt(s, pos);
+    return n > 0 ? n : 1;
   };
   while (i < prev.size()) {
-    if (isSepAt(prev, i)) {
+    if (sepLenAt(prev, i) > 0) {
       if (!w.empty()) { prevWords.insert(w); w.clear(); }
-      i += 3;
+      i += sepLenAt(prev, i);
     } else {
       w += prev[i];
       i += 1;
@@ -305,12 +319,12 @@ std::string EnvironmentAwareness::computeDiff(const std::string& prev,
   w.clear();
   i = 0;
   while (i < cur.size()) {
-    if (isSepAt(cur, i)) {
+    if (sepLenAt(cur, i) > 0) {
       if (!w.empty()) {
         if (prevWords.find(w) == prevWords.end() && added.size() < 8) added.push_back(w);
         w.clear();
       }
-      i += 3;
+      i += sepLenAt(cur, i);
     } else {
       w += cur[i];
       i += 1;

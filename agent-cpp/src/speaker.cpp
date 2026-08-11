@@ -35,6 +35,7 @@ void loopbackCallback(ma_device* device, void* /*pOutput*/, const void* pInput,
 SpeakerStream::~SpeakerStream() { abort(); }
 
 bool SpeakerStream::start(PcmCallback onPcm, ErrorCallback onError) {
+  std::lock_guard<std::mutex> lk(mtx_);
   if (running_.load()) return false;
   // Join any leftover thread from a previous start() whose loop() exited early
   // (e.g. ma_device_init_ex failed): reassigning a joinable std::thread calls
@@ -89,6 +90,7 @@ void SpeakerStream::loop() {
 }
 
 void SpeakerStream::stop() {
+  std::lock_guard<std::mutex> lk(mtx_);
   if (!running_.load()) {
     // A previous start() that failed inside loop() leaves the thread joinable;
     // join it so the next start() doesn't reassign a live std::thread.
@@ -101,6 +103,7 @@ void SpeakerStream::stop() {
 }
 
 void SpeakerStream::abort() {
+  std::lock_guard<std::mutex> lk(mtx_);
   stopRequested_ = true;
   if (thread_.joinable()) thread_.join();
   running_ = false;

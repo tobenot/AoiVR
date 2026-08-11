@@ -33,10 +33,10 @@ bool isValidBase64(const std::string& in) {
     if (in.size() % 4 == 1) return false;
   } else {
     if (in.size() % 4 != 0) return false;
+    // dataLen ≡ 1 (mod 4) can never be valid padding ("AA===" style).
+    // dataLen == 0 means padding with no payload at all ("==" / "=").
+    if (dataLen % 4 == 1 || dataLen == 0) return false;
   }
-  // Padding must not exceed the data it pads (a pure "=" / "==" input would
-  // make the decoder's length math underflow to SIZE_MAX).
-  if (eq != std::string::npos && in.size() - eq >= dataLen) return false;
   return true;
 }
 

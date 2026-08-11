@@ -97,10 +97,13 @@ HRESULT forEachSession(const std::string& filter, Fn fn) {
           if (FAILED(sen->GetSession(k, &ctl))) continue;
           IAudioSessionControl2* ctl2 = nullptr;
           ISimpleAudioVolume* vol = nullptr;
-          if (SUCCEEDED(ctl->QueryInterface(__uuidof(IAudioSessionControl2),
-                                            reinterpret_cast<void**>(&ctl2))) &&
-              SUCCEEDED(ctl->QueryInterface(__uuidof(ISimpleAudioVolume),
-                                            reinterpret_cast<void**>(&vol)))) {
+          // QI each interface independently and release what succeeded: the
+          // old combined condition leaked ctl2 when the volume QI failed.
+          const bool got2 = SUCCEEDED(ctl->QueryInterface(
+              __uuidof(IAudioSessionControl2), reinterpret_cast<void**>(&ctl2)));
+          const bool gotV = SUCCEEDED(ctl->QueryInterface(
+              __uuidof(ISimpleAudioVolume), reinterpret_cast<void**>(&vol)));
+          if (got2 && gotV) {
             DWORD pid = 0;
             ctl2->GetProcessId(&pid);
             Session s;
@@ -114,9 +117,9 @@ HRESULT forEachSession(const std::string& filter, Fn fn) {
             // by get_volume — the caller already has the precise name.
             const bool match = want.empty() || s.process == filter;
             if (match && fn(dev, s, vol)) touched = true;
-            vol->Release();
-            ctl2->Release();
           }
+          if (vol) vol->Release();
+          if (ctl2) ctl2->Release();
           ctl->Release();
         }
         sen->Release();

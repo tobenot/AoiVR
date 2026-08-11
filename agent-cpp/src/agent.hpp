@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <atomic>
 #include <condition_variable>
 #include <functional>
@@ -156,7 +156,14 @@ class AoiAgent {
   bool tuiHeaderSent_ = false;
 
   std::unique_ptr<SpeechInterpreter> interpreter_;
+  // Read by translation worker threads (prompt text) and written by the msg
+  // thread (startInterpretation) - guarded, never access raw across threads.
   std::string targetLang_ = "中文";
+  mutable std::mutex targetLangMutex_;
+  std::string currentTargetLang() const {
+    std::lock_guard<std::mutex> lk(targetLangMutex_);
+    return targetLang_;
+  }
   std::vector<std::string> interpretationHistory_;
   mutable std::mutex interpHistoryMutex_;  // guards interpretationHistory_
   // Sliding-window context: the previous window's source text + translation
@@ -168,7 +175,7 @@ class AoiAgent {
   std::map<int, std::shared_ptr<std::string>> pendingTranslations_;
   std::mutex pendingTranslationsMutex_;
   std::mutex deliveringMutex_;
-  int nextSeqToSend_ = 1;
+  std::atomic<int> nextSeqToSend_{1};
   bool delivering_ = false;
   // Atomic: read/written from different threads (msg thread, segmenter PCM
   // thread, translation workers).
@@ -198,8 +205,8 @@ class AoiAgent {
 
   std::string lastUtteranceTime_;
   std::string pendingShotPath_;
-  int lastSegStartSample_ = -1;
-  int lastSegEndSample_ = -1;
+  std::atomic<int> lastSegStartSample_{-1};
+  std::atomic<int> lastSegEndSample_{-1};
 
   // Pending request tracking (id -> result).
   struct PendingRequest {

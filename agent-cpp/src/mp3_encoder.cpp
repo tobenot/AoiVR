@@ -48,7 +48,7 @@ bool drainOutput(IMFTransform* enc, FILE* f, bool* wroteAny) {
     if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) return true;
     if (FAILED(hr)) return false;
     // Write the produced MP3 bytes.
-    IMFMediaBuffer* mb = nullptr;
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> mb;
     if (odb.pSample) odb.pSample->GetBufferByIndex(0, &mb);
     if (mb) {
       BYTE* ptr = nullptr;
@@ -186,6 +186,12 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
   for (;;) {
     const size_t n = std::min(chunkFrames, totalFrames - off);
     if (n > 0) {
+      // Channel-count check BEFORE any pointer arithmetic on pcm (a wrong
+      // stride would be UB even without dereferencing).
+      if (inChannels != channels) {
+        failed = true;
+        break;
+      }
       Microsoft::WRL::ComPtr<IMFMediaBuffer> buf;
       if (FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(n * frameBytes), &buf))) {
         failed = true;
@@ -198,15 +204,6 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
         break;
       }
       const int16_t* src = pcm.data() + off * inChannels;
-      // The encoder's negotiated input format is its native one (44.1k/48k
-      // stereo s16). No hand-written conversion here: WASAPI delivers exactly
-      // this format from the mic, and if a caller passes anything else we
-      // fail and the caller falls back to sending wav.
-      if (inChannels != channels) {
-        buf->Unlock();
-        failed = true;
-        break;
-      }
       std::memcpy(ptr, src, n * frameBytes);
       buf->SetCurrentLength(static_cast<DWORD>(n * frameBytes));
       buf->Unlock();
@@ -219,8 +216,19 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
       sample->SetSampleTime(static_cast<LONGLONG>(off) * 10000000 / sampleRate);
       sample->SetSampleDuration(static_cast<LONGLONG>(n) * 10000000 / sampleRate);
       const HRESULT pi = enc->ProcessInput(0, sample.Get(), 0);
-      if (FAILED(pi)) {
-        // MF_E_NOTACCEPTING usually means we must drain first; loop again.
+      if (pi == MF_E_NOTACCEPTING) {
+        // Encoder buffers are full: drain output, then retry the SAME input
+        // (failing here would discard every frame already fed in).
+        if (!drainOutput(enc.Get(), f, &wroteAny)) {
+          failed = true;
+          break;
+        }
+        const HRESULT pi2 = enc->ProcessInput(0, sample.Get(), 0);
+        if (FAILED(pi2)) {
+          failed = true;
+          break;
+        }
+      } else if (FAILED(pi)) {
         failed = true;
         break;
       }
@@ -241,12 +249,12 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
       Microsoft::WRL::ComPtr<IMFSample> outS;
       Microsoft::WRL::ComPtr<IMFMediaBuffer> ob;
       if (FAILED(MFCreateSample(&outS))) { failed = true; break; }
-      if (FAILED(MFCreateMemoryBuffer(16384, &ob))) { failed = true; break; }
+      if (FAILED(MFCreateMemoryBuffer(65536, &ob))) { failed = true; break; }
       outS->AddBuffer(ob.Get());
       odb.pSample = outS.Get();
       const HRESULT hd = enc->ProcessOutput(0, 1, &odb, nullptr);
       if (hd == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
-      if (FAILED(hd)) break;
+      if (FAILED(hd)) { failed = true; break; }
       IMFMediaBuffer* mb = nullptr;
       if (odb.pSample) odb.pSample->GetBufferByIndex(0, &mb);
       if (mb) {

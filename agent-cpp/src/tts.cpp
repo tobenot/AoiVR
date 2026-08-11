@@ -41,6 +41,9 @@ bool MiMoTTS::speak(const std::string& text, const std::string& style,
   };
 
   bool httpOk = true;
+  // A caller-triggered abort is NOT a success: report it as a failure so the
+  // speaker queue doesn't treat a partial audio stream as the full reply.
+  if (aborted_.load()) return false;
   std::string buffer;  // SSE line buffer, scoped to this request
   // Cancel check so abort() interrupts the in-flight curl call promptly
   // (prevents detached-style hangs on shutdown).
@@ -83,7 +86,9 @@ bool MiMoTTS::speak(const std::string& text, const std::string& style,
     }
   }, [this]() { return aborted_.load(); });
 
-  if (res.status >= 400 || (res.status <= 0 && !aborted_.load())) {
+  if (aborted_.load()) {
+    httpOk = false;  // aborted mid-stream: partial audio must not pass as OK
+  } else if (res.status >= 400 || res.status <= 0) {
     httpOk = false;
   }
   return httpOk;

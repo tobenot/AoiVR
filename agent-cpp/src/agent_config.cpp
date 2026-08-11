@@ -64,6 +64,10 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
       }
     }
   }
+  // Any type-mismatched value below (e.g. "maxHooks":"abc") would throw a
+  // nlohmann type_error out of loadAgentConfig and kill agent startup.
+  // Malformed config fields degrade to defaults instead.
+  try {
   if (root.is_object() && root.contains("tts") && root["tts"].is_object()) {
     const auto& tts = root["tts"];
     if (tts.contains("enabled")) {
@@ -120,6 +124,9 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     if (cfg.hooks.scriptTimeoutSeconds < 1) cfg.hooks.scriptTimeoutSeconds = 30;
     if (cfg.hooks.scriptOutputLimitBytes < 1024)
       cfg.hooks.scriptOutputLimitBytes = 30 * 1024;
+  }
+  } catch (...) {
+    // A malformed field type must not abort startup; keep what parsed so far.
   }
   return cfg;
 }

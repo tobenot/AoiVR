@@ -41,13 +41,42 @@ namespace {
 std::string readAllStdin() {
   std::ostringstream ss;
   char buf[4096];
+  size_t total = 0;
+  constexpr size_t kMaxStdin = 16 * 1024 * 1024;  // bound the op JSON
   size_t n = 0;
   do {
     std::cin.read(buf, sizeof(buf));
     n = static_cast<size_t>(std::cin.gcount());
-    if (n > 0) ss.write(buf, static_cast<std::streamsize>(n));
+    if (n > 0) {
+      const size_t room = kMaxStdin - (std::min)(kMaxStdin, total);
+      if (room == 0) break;
+      const size_t take = (std::min)(room, n);
+      ss.write(buf, static_cast<std::streamsize>(take));
+      total += take;
+    }
   } while (n > 0);
   return ss.str();
+}
+
+// Reject paths that could escape the intended root: absolute paths, drive
+// letters, UNC roots and any ".." component. write/edit rely on this; read
+// keeps absolute paths (sandbox user's own permissions apply) but its exeDir
+// fallback must also pass this check.
+bool isSafeRelativePath(const std::string& path) {
+  if (path.empty()) return false;
+  if (path.size() >= 2 && path[1] == ':') return false;      // drive letter
+  if (path[0] == '\\' || path[0] == '/') return false;       // absolute/UNC
+  std::string cur;
+  for (size_t i = 0; i <= path.size(); ++i) {
+    const char ch = i < path.size() ? path[i] : '\0';
+    if (ch == '\\' || ch == '/' || ch == '\0') {
+      if (cur == "..") return false;
+      cur.clear();
+    } else {
+      cur += ch;
+    }
+  }
+  return true;
 }
 
 std::string readTextFile(const std::string& path, size_t maxBytes = 60000) {
@@ -168,8 +197,10 @@ bool initRestrictedToken(const char* capSidStr) {
       base, DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED, 0, nullptr, 0,
       nullptr, static_cast<DWORD>(n), restricting, &restricted);
   CloseHandle(base);
-  LocalFree(capSid);
-  if (!ok || !restricted) return false;
+  if (!ok || !restricted) {
+    LocalFree(capSid);
+    return false;
+  }
 
   // Default DACL: grant logon SID + Everyone + capability SID so sandboxed
   // processes can create pipes / IPC objects (Codex token.rs).
@@ -194,6 +225,8 @@ bool initRestrictedToken(const char* capSidStr) {
       LocalFree(dacl);
     }
   }
+  // capSid is no longer referenced after the default-DACL block above.
+  LocalFree(capSid);
 
   // Re-enable directory traversal (disabled by DISABLE_MAX_PRIVILEGE).
   enablePrivilege(restricted, "SeChangeNotifyPrivilege");
@@ -451,7 +484,8 @@ int main(int argc, char** argv) {
   }
   const std::string input = readAllStdin();
   json req = json::parse(input, nullptr, false);
-  if (req.is_discarded() || !req.is_object() || !req.contains("op")) {
+  if (req.is_discarded() || !req.is_object() || !req.contains("op") ||
+      !req["op"].is_string()) {
     std::cout << R"json({"ok":false,"error":"(sandbox helper: bad request)"})json" << std::endl;
     return 1;
   }
@@ -467,8 +501,10 @@ int main(int argc, char** argv) {
       // Shipped knowledge files (e.g. docs/...) live next to the AGENT exe,
       // outside the sandbox workspace. When the relative path does not exist
       // in the workspace, resolve it against the exe dir (read-only fallback;
-      // write/edit NEVER follow this path).
-      if (output.rfind("(file not found", 0) == 0 && !g_exeDir.empty()) {
+      // write/edit NEVER follow this path). The fallback only applies to safe
+      // relative paths - a ".." path could escape the exe dir.
+      if (output.rfind("(file not found", 0) == 0 && !g_exeDir.empty() &&
+          isSafeRelativePath(path)) {
         const std::string alt = readTextFile(g_exeDir + "\\" + path);
         if (alt.rfind("(file not found", 0) != 0) output = alt;
       }
@@ -478,7 +514,9 @@ int main(int argc, char** argv) {
       // Bound the write size: the model could otherwise exhaust disk (and the
       // op JSON itself is unbounded in the agent->helper pipe).
       constexpr size_t kMaxWriteBytes = 8 * 1024 * 1024;
-      if (content.size() > kMaxWriteBytes) {
+      if (!isSafeRelativePath(path)) {
+        error = "(write rejected: path must be relative to the sandbox workspace)";
+      } else if (content.size() > kMaxWriteBytes) {
         error = "(write rejected: content exceeds 8MB limit)";
       } else {
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -494,6 +532,9 @@ int main(int argc, char** argv) {
       const std::string path = req.value("path", "");
       const std::string oldS = req.value("old_string", "");
       const std::string newS = req.value("new_string", "");
+      if (!isSafeRelativePath(path)) {
+        error = "(edit rejected: path must be relative to the sandbox workspace)";
+      } else {
       std::ifstream in(path, std::ios::binary);
       if (!in.is_open()) {
         error = "(file not found: " + path + ")";
@@ -502,20 +543,26 @@ int main(int argc, char** argv) {
         ss << in.rdbuf();
         in.close();
         std::string text = ss.str();
-        const size_t pos = text.find(oldS);
-        if (pos == std::string::npos) {
-          error = "(old_string not found in file)";
+        constexpr size_t kMaxEditBytes = 10 * 1024 * 1024;
+        if (text.size() > kMaxEditBytes) {
+          error = "(edit rejected: file exceeds 10MB limit)";
         } else {
-          text.replace(pos, oldS.size(), newS);
-          std::ofstream out(path, std::ios::binary | std::ios::trunc);
-          if (!out.is_open()) {
-            error = "(cannot write file: " + path + ")";
+          const size_t pos = text.find(oldS);
+          if (pos == std::string::npos) {
+            error = "(old_string not found in file)";
           } else {
-            out.write(text.data(), static_cast<std::streamsize>(text.size()));
-            out.close();
-            output = "Edit applied.";
+            text.replace(pos, oldS.size(), newS);
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (!out.is_open()) {
+              error = "(cannot write file: " + path + ")";
+            } else {
+              out.write(text.data(), static_cast<std::streamsize>(text.size()));
+              out.close();
+              output = "Edit applied.";
+            }
           }
         }
+      }
       }
     } else if (op == "sql_query") {
       output = runSqlQuery(req.value("db_path", ""), req.value("sql", ""));

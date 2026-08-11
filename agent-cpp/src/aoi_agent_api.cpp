@@ -69,14 +69,23 @@ void agentWorker() {
       Sleep(200);
     }
     agent->stop();
-    g_agent.reset();
+    // Reset under the lifecycle lock: AoiAgent_SendJson copies g_agent under
+    // the same lock, so an unlocked reset racing a copy is a data race on the
+    // shared_ptr control block (use-after-free of the refcount).
+    {
+      std::lock_guard<std::mutex> lk(g_lifecycleMutex);
+      g_agent.reset();
+    }
   } catch (...) {
     // Any exception escaping a std::thread body is std::terminate (process
     // death). Catch it, clean up, and flip running off so the C ABI never
     // observes a half-built agent.
     if (g_agent) {
       try { g_agent->stop(); } catch (...) {}
-      g_agent.reset();
+      {
+        std::lock_guard<std::mutex> lk(g_lifecycleMutex);
+        g_agent.reset();
+      }
     }
     g_running = false;
   }

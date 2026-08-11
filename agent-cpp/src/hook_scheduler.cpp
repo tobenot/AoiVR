@@ -395,8 +395,17 @@ void HookScheduler::schedulerLoop() {
     if (!jobs.empty()) {
       lk.unlock();
       for (const auto& j : jobs) {
-        if (j.row.actionType == "script") runScript(j.row, j.firedAt);
-        else runLlm(j.row, "");
+        // Any exception escaping runScript/runLlm would terminate the whole
+        // process (thread entry without a handler). Malformed helper replies
+        // (wrong JSON types) and callback throws land here - log and continue.
+        try {
+          if (j.row.actionType == "script") runScript(j.row, j.firedAt);
+          else runLlm(j.row, "");
+        } catch (const std::exception& ex) {
+          if (logCb_) logCb_(std::string("(hooks) hook dispatch error: ") + ex.what());
+        } catch (...) {
+          if (logCb_) logCb_("(hooks) hook dispatch error: unknown exception");
+        }
       }
       lk.lock();
     }
@@ -436,10 +445,17 @@ void HookScheduler::collectDueHooks(std::vector<DispatchJob>& jobs) {
     } else if (h.triggerType == "at" && h.atHour >= 0) {
       const int targetMinute = h.atHour * 60 + h.atMinute;
       due = nowMinute == targetMinute;
+      // Dedupe on the FULL timestamp (date included): comparing only
+      // hour:minute would suppress every later day's fire (yesterday's
+      // 12:34 matches today's 12:34) - the hook would fire exactly once ever.
       if (due && !last.empty()) {
         std::tm lastTm{};
-        if (parseDateTime(last, &lastTm))
-          due = (nowTm.tm_hour != lastTm.tm_hour || nowTm.tm_min != lastTm.tm_min);
+        if (parseDateTime(last, &lastTm)) {
+          due = nowTm.tm_year != lastTm.tm_year ||
+                nowTm.tm_yday != lastTm.tm_yday ||
+                nowTm.tm_hour != lastTm.tm_hour ||
+                nowTm.tm_min != lastTm.tm_min;
+        }
       }
     }
     if (!due) continue;

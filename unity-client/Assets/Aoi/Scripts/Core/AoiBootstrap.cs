@@ -511,7 +511,12 @@ public class AoiBootstrap : MonoBehaviour
             TextAlignmentOptions.MidlineLeft, Color.yellow, false);
         procText.font = AoiOrchestrator.ResolveMonoFont();
         procText.characterSpacing = 10f;
-        procText.overflowMode = TextOverflowModes.Ellipsis;
+        // Mask (not Ellipsis): the procbar text scrolls horizontally like a
+        // marquee when the thought stream is longer than the panel, so new
+        // content stays visible. Requires a RectMask2D on the panel.
+        procText.overflowMode = TextOverflowModes.Masking;
+        procText.enableWordWrapping = false;  // single line; marquee scrolls horizontally
+        procbar.AddComponent<RectMask2D>();
         var ptRT = procText.GetComponent<RectTransform>();
         ptRT.anchorMin = Vector2.zero;
         ptRT.anchorMax = Vector2.one;

@@ -330,6 +330,7 @@ std::string EnvironmentAwareness::computeDiff(const std::string& prev,
 }
 
 void EnvironmentAwareness::startAudio() {
+  std::lock_guard<std::mutex> lk(audioMutex_);
   if (audioSegmenter_ && audioSegmenter_->running()) return;
   SpeechSegmenterOptions segOpts;
   segOpts.fixedSegmentSeconds = opts_.autoUnderstand ? 0 : opts_.audioSegmentSeconds;
@@ -377,6 +378,7 @@ void EnvironmentAwareness::startAudio() {
 }
 
 void EnvironmentAwareness::stopAudio() {
+  std::lock_guard<std::mutex> lk(audioMutex_);
   if (audioSegmenter_) {
     audioSegmenter_->stop();
     audioSegmenter_.reset();
@@ -384,6 +386,7 @@ void EnvironmentAwareness::stopAudio() {
 }
 
 void EnvironmentAwareness::pauseAudio() {
+  std::lock_guard<std::mutex> lk(audioMutex_);
   if (audioSegmenter_ && audioSegmenter_->running()) {
     audioSegmenter_->stop();
     audioSegmenter_.reset();
@@ -392,8 +395,7 @@ void EnvironmentAwareness::pauseAudio() {
 
 void EnvironmentAwareness::resumeAudio() {
   if (!enabled_.load() || !opts_.captureAudio) return;
-  if (audioSegmenter_ && audioSegmenter_->running()) return;
-  startAudio();
+  startAudio();  // startAudio() takes audioMutex_ itself
 }
 
 void EnvironmentAwareness::addAudio(const std::string& text) {

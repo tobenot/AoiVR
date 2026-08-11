@@ -14,10 +14,12 @@
 
 #include "agent_config.hpp"
 #include "environment_awareness.hpp"
+#include "hook_scheduler.hpp"
 #include "interpreter.hpp"
 #include "llm_client.hpp"
 #include "mic.hpp"
 #include "player.hpp"
+#include "registry.hpp"
 #include "tts.hpp"
 #include "types.hpp"
 
@@ -59,6 +61,7 @@ class AoiAgent {
   void onMessage(const Message& msg);
   void handleStateChange(const Message& msg);
   void handleUserInput(const Message& msg);
+  std::string buildSystemPrompt() const;
   void send(MessageType type, nlohmann::json payload);
   void sendTuiFeed(const std::string& text);
 
@@ -78,6 +81,10 @@ class AoiAgent {
   void handleAgentEnd();
 
   // ---- tools ----
+  // Tool factories keyed by tool name; the registry decides which are
+  // registered and may override their label/description/parameters.
+  std::vector<std::pair<std::string, std::function<ToolDefinition()>>>
+  makeToolFactories();
   ToolDefinition makeScreenshotTool();
   ToolDefinition makeVrSetBrightnessTool();
   ToolDefinition makeSystemTool();
@@ -133,7 +140,14 @@ class AoiAgent {
   std::string lastSpoken_;  // last TTS sentence spoken (dedup guard)
   std::atomic<int> ttsGeneration_{0};  // bumped on each enqueue/stop; workers check it
   bool ttsPlaying_ = false;
-  bool ttsStopRequested_ = false;
+  // Generation that currently owns the playback right (guarded by ttsMutex_).
+  // A stale worker (gen mismatch) that exits while the queue is non-empty must
+  // NOT clear ttsPlaying_ (that would permanently silence later enqueues);
+  // instead the next enqueue takes over when ownerGen is stale.
+  int ttsOwnerGen_ = 0;
+  // Atomic: written under ttsMutex_ by the msg thread, read WITHOUT the lock
+  // by TTS worker threads in streamTts().
+  std::atomic<bool> ttsStopRequested_{false};
   int64_t lastTextSendTime_ = 0;
   // Live model reasoning (thinking) streamed to the procbar ("thinking" stage).
   std::string thinkingText_;
@@ -156,7 +170,9 @@ class AoiAgent {
   std::mutex deliveringMutex_;
   int nextSeqToSend_ = 1;
   bool delivering_ = false;
-  bool interpActive_ = false;
+  // Atomic: read/written from different threads (msg thread, segmenter PCM
+  // thread, translation workers).
+  std::atomic<bool> interpActive_{false};
   // Generation counter for interpretation sessions. Bumped on every start;
   // translation workers capture it and discard their result if the session
   // they belong to is no longer current (prevents stale cross-session writes).
@@ -176,6 +192,9 @@ class AoiAgent {
   void joinWorkers();
 
   std::unique_ptr<EnvironmentAwareness> awareness_;
+
+  // Timer-hook scheduler: dedicated thread, never blocks the message loop.
+  std::unique_ptr<HookScheduler> hookScheduler_;
 
   std::string lastUtteranceTime_;
   std::string pendingShotPath_;

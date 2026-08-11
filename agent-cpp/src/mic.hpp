@@ -38,6 +38,10 @@ class MicCapture {
   void recordLoop();
 
   std::thread thread_;
+  // Serializes start()/stop()/abort() so concurrent calls (e.g. the message
+  // worker starting a capture while the host thread stops the agent) never
+  // race on `thread_` / flags (std::thread is not thread-safe).
+  std::mutex mtx_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stopRequested_{false};
   int sampleRate_ = 16000;

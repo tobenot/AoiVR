@@ -35,6 +35,16 @@ class HttpClient {
   struct Result {
     long status = 0;
     std::string body;  // only populated when onData is not provided
+    // Response headers, keys lowercased (e.g. "retry-after", "content-type").
+    // Used by the caller for Retry-After backoff handling.
+    std::vector<std::pair<std::string, std::string>> headers;
+    // curl error text on transport failure (status <= 0), empty otherwise.
+    std::string error;
+    // libcurl CURLcode of the transfer (CURLE_OK on success). A non-OK code
+    // combined with a positive HTTP status means the connection broke in the
+    // middle of the response body ("mid-stream break") - the response was NOT
+    // complete even though headers were received.
+    int curlCode = 0;
   };
 
   // POST with streaming response. headers includes "Content-Type: ..." etc.

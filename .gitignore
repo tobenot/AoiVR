@@ -50,3 +50,6 @@ build_log*.txt
 # Build-generated (see README build steps)
 unity-client/Assets/Aoi/Plugins/x86_64/aoi_agent.dll
 unity-client/Assets/AoiMain.unity
+
+# Runtime-generated registry (agent writes next to cwd)
+agent-cpp/system_registry.json

@@ -9,6 +9,8 @@
 #include <string>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+
 #include "agent.hpp"
 
 namespace {
@@ -99,9 +101,14 @@ void AoiAgent_SetEnv(const char* name, const char* value) {
 int AoiAgent_Start(void) {
   try {
     std::lock_guard<std::mutex> lk(g_lifecycleMutex);
-    if (g_running.exchange(true)) return 1;
+    if (g_running.load()) return 1;
     if (g_agentThread.joinable()) g_agentThread.join();
-    g_agentThread = std::thread(agentWorker);
+    try {
+      g_agentThread = std::thread(agentWorker);
+    } catch (...) {
+      return -1;  // thread construction failed: leave g_running false
+    }
+    g_running = true;
     return 0;
   } catch (...) {
     return -1;
@@ -170,18 +177,18 @@ int AoiAgent_SendJson(const char* json) {
 namespace {
 
 // Build a message envelope and push it into the agent.
-int sendTypedMessage(const char* type, const char* payloadJson, const char* id) {
+int sendTypedMessage(const char* type, const nlohmann::json& payload, const char* id) {
   if (!type) return 0;
   // Build the full envelope JSON here (schema lives in the DLL). Field names
   // may be encrypted by an external build layer for shipped builds; the wire
-  // schema stays the same either way.
-  std::string msg;
-  msg += std::string("{\"") + "type" + "\":\"" + std::string(type) + "\",\"" +
-         "payload" + "\":";
-  msg += payloadJson ? payloadJson : "{}";
-  msg += std::string(",\"") + "timestamp" + "\":\"\",\"" + "id" + "\":\"";
-  msg += id ? id : "";
-  msg += "\"}";
+  // schema stays the same either way. JSON is built with nlohmann so paths /
+  // strings with quotes or backslashes are always escaped.
+  const std::string msg =
+      nlohmann::json{{"type", type},
+                     {"payload", payload},
+                     {"timestamp", ""},
+                     {"id", id ? id : ""}}
+          .dump();
   try {
     std::shared_ptr<aoi::AoiAgent> agent;
     {
@@ -199,11 +206,10 @@ int sendTypedMessage(const char* type, const char* payloadJson, const char* id) 
 
 int AoiAgent_SendStateChange(const char* state, const char* mode, const char* shotPath) {
   try {
-    std::string payload = std::string("{\"") + "state" + "\":\"" + std::string(state ? state : "") + "\"";
-    if (mode && *mode) payload += std::string(",\"") + "mode" + "\":\"" + std::string(mode) + "\"";
-    if (shotPath && *shotPath) payload += std::string(",\"") + "shot_path" + "\":\"" + std::string(shotPath) + "\"";
-    payload += "}";
-    return sendTypedMessage("state_change", payload.c_str(), nullptr);
+    nlohmann::json payload{{"state", state ? state : ""}};
+    if (mode && *mode) payload["mode"] = mode;
+    if (shotPath && *shotPath) payload["shot_path"] = shotPath;
+    return sendTypedMessage("state_change", payload, nullptr);
   } catch (...) {
     return 0;
   }
@@ -211,7 +217,7 @@ int AoiAgent_SendStateChange(const char* state, const char* mode, const char* sh
 
 int AoiAgent_SendTtsStop(void) {
   try {
-    return sendTypedMessage("tts_stop", "{}", nullptr);
+    return sendTypedMessage("tts_stop", nlohmann::json::object(), nullptr);
   } catch (...) {
     return 0;
   }
@@ -219,8 +225,8 @@ int AoiAgent_SendTtsStop(void) {
 
 int AoiAgent_SendScreenshotPath(const char* requestId, const char* path) {
   try {
-    std::string payload = std::string("{\"") + "path" + "\":\"" + std::string(path ? path : "") + "\"}";
-    return sendTypedMessage("screenshot_response", payload.c_str(), requestId);
+    return sendTypedMessage("screenshot_response",
+                            nlohmann::json{{"path", path ? path : ""}}, requestId);
   } catch (...) {
     return 0;
   }
@@ -228,10 +234,13 @@ int AoiAgent_SendScreenshotPath(const char* requestId, const char* path) {
 
 int AoiAgent_SendScreenshotImage(const char* requestId, const char* base64Jpeg) {
   try {
-    std::string payload = std::string("{\"") + "image" + "\":\"" + std::string(base64Jpeg ? base64Jpeg : "") +
-                          "\",\"" + "width" + "\":1024,\"" + "height" + "\":1024,\"" +
-                          "format" + "\":\"" + "jpeg" + "\"}";
-    return sendTypedMessage("screenshot_response", payload.c_str(), requestId);
+    return sendTypedMessage(
+        "screenshot_response",
+        nlohmann::json{{"image", base64Jpeg ? base64Jpeg : ""},
+                       {"width", 1024},
+                       {"height", 1024},
+                       {"format", "jpeg"}},
+        requestId);
   } catch (...) {
     return 0;
   }
@@ -239,11 +248,14 @@ int AoiAgent_SendScreenshotImage(const char* requestId, const char* base64Jpeg) 
 
 int AoiAgent_SendScreenshotError(const char* requestId, const char* error) {
   try {
-    std::string payload = std::string("{\"") + "image" + "\":\"\",\"" + "width" + "\":0,\"" +
-                          "height" + "\":0,\"" + "format" + "\":\"" + "png" +
-                          "\",\"" + "error" + "\":\"" +
-                           std::string(error ? error : "screenshot_failed") + "\"}";
-    return sendTypedMessage("screenshot_response", payload.c_str(), requestId);
+    return sendTypedMessage(
+        "screenshot_response",
+        nlohmann::json{{"image", ""},
+                       {"width", 0},
+                       {"height", 0},
+                       {"format", "png"},
+                       {"error", error ? error : "screenshot_failed"}},
+        requestId);
   } catch (...) {
     return 0;
   }
@@ -251,7 +263,12 @@ int AoiAgent_SendScreenshotError(const char* requestId, const char* error) {
 
 int AoiAgent_SendVrSkillResult(const char* requestId, const char* resultJson) {
   try {
-    return sendTypedMessage("vr_skill_response", resultJson ? resultJson : "{}", requestId);
+    nlohmann::json payload = nlohmann::json::object();
+    if (resultJson && *resultJson) {
+      const nlohmann::json parsed = nlohmann::json::parse(resultJson, nullptr, false);
+      if (!parsed.is_discarded()) payload = parsed;
+    }
+    return sendTypedMessage("vr_skill_response", payload, requestId);
   } catch (...) {
     return 0;
   }
@@ -260,7 +277,7 @@ int AoiAgent_SendVrSkillResult(const char* requestId, const char* resultJson) {
 int AoiAgent_SendDisplayResult(bool success) {
   try {
     return sendTypedMessage("display_result",
-                            success ? "{\"success\":true}" : "{\"success\":false}", nullptr);
+                            nlohmann::json{{"success", success}}, nullptr);
   } catch (...) {
     return 0;
   }

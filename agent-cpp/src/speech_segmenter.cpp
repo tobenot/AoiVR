@@ -62,6 +62,18 @@ bool SpeechSegmenter::start() {
 
   seq_ = 0;
   ring_.reset();
+  // Reset sliding-window state: the absolute sample counters are relative to
+  // "start()" and MUST be re-initialized on restart, otherwise the capture
+  // frontier can never catch up with the stale slideNextSample_ and the
+  // window stops cutting forever (and the first cut could underflow the
+  // buffer index).
+  slidePcm_.clear();
+  slideStartSample_ = 0;
+  slideNextSample_ = 0;
+  slideStepSamples_ = 0;
+  slideWindowSamples_ = 0;
+  fixedPcm_.clear();
+  fixedStartSample_ = 0;
 
   speaker_.start(
       [this](const std::vector<uint8_t>& pcm) { handlePcm(pcm); },

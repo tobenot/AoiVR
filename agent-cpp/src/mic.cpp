@@ -32,6 +32,7 @@ void captureCallback(ma_device* device, void* pOutput, const void* pInput,
 MicCapture::~MicCapture() { abort(); }
 
 bool MicCapture::start(int sampleRate) {
+  std::lock_guard<std::mutex> lk(mtx_);
   if (running_.load()) return false;
   // Join any leftover thread from a previous start() whose recordLoop exited
   // early (e.g. ma_device_init failed without a device present): the flag is
@@ -85,6 +86,7 @@ void MicCapture::recordLoop() {
 }
 
 MicResult MicCapture::stop() {
+  std::lock_guard<std::mutex> lk(mtx_);
   if (!running_.load()) {
     // A previous start() that failed inside recordLoop() leaves the thread
     // joinable; join it here so the next start() doesn't reassign a live
@@ -94,7 +96,8 @@ MicResult MicCapture::stop() {
   }
   stopRequested_ = true;
   if (thread_.joinable()) thread_.join();
-  std::lock_guard<std::mutex> lk(resultMutex_);
+  running_ = false;
+  std::lock_guard<std::mutex> lk2(resultMutex_);
   MicResult res;
   res.wavBuffer = buildWavFromPcm(pcm_);
   res.sampleRate = sampleRate_;
@@ -103,11 +106,12 @@ MicResult MicCapture::stop() {
 }
 
 void MicCapture::abort() {
+  std::lock_guard<std::mutex> lk(mtx_);
   stopRequested_ = true;
   if (thread_.joinable()) thread_.join();
   running_ = false;
   {
-    std::lock_guard<std::mutex> lk(resultMutex_);
+    std::lock_guard<std::mutex> lk2(resultMutex_);
     pcm_.clear();
   }
 }

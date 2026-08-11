@@ -51,8 +51,11 @@ std::string deviceName(IMMDevice* dev) {
     PropVariantInit(&v);
     if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &v)) && v.pwszVal) {
       int n = WideCharToMultiByte(CP_UTF8, 0, v.pwszVal, -1, nullptr, 0, nullptr, nullptr);
-      out.assign(n > 0 ? n - 1 : 0, '\0');
-      if (n > 0) WideCharToMultiByte(CP_UTF8, 0, v.pwszVal, -1, &out[0], n, nullptr, nullptr);
+      if (n > 0) {
+        out.assign(static_cast<size_t>(n), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, v.pwszVal, -1, out.data(), n, nullptr, nullptr);
+        if (!out.empty()) out.pop_back();  // drop the trailing NUL
+      }
     }
     PropVariantClear(&v);
     props->Release();

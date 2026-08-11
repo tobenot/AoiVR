@@ -33,6 +33,16 @@ struct AgentFileConfig {
   // Optional custom path to the VRCX SQLite database (aoi_config.json top-level
   // "vrcxDbPath"). Empty -> default %APPDATA%\VRCX\VRCX.sqlite3.
   std::string vrcxDbPath;
+  // Timer-hook scheduler guardrails (aoi_config.json -> "hooks").
+  struct {
+    bool enabled = true;
+    int maxHooks = 10;
+    int dailyBudget = 100;
+    int silentStart = 0;  // hour, inclusive
+    int silentEnd = 8;    // hour, exclusive
+    int scriptTimeoutSeconds = 30;
+    int scriptOutputLimitBytes = 102400;
+  } hooks;
 };
 
 // Load aoi_config.json from `workDir`. Missing file / unparsable JSON / missing

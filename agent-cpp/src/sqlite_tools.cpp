@@ -1,10 +1,9 @@
 #include "sqlite_tools.hpp"
 
-#include <sqlite3.h>
-
 #include <cstdlib>
 #include <string>
-#include <vector>
+
+#include "windows_sandbox.hpp"
 
 namespace aoi {
 
@@ -21,64 +20,6 @@ std::string defaultVrcxPath() {
 std::string trimLeft(const std::string& s) {
   const size_t pos = s.find_first_not_of(" \t\r\n");
   return pos == std::string::npos ? std::string() : s.substr(pos);
-}
-
-// Run a read-only query; on success returns the rows (each a JSON object of
-// column name -> value) and leaves `err` empty.
-nlohmann::json queryRows(const std::string& path, const std::string& sql,
-                         std::string& err) {
-  sqlite3* db = nullptr;
-  if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
-    err = db ? sqlite3_errmsg(db) : "cannot open database";
-    if (db) sqlite3_close(db);
-    return nlohmann::json::array();
-  }
-
-  sqlite3_stmt* stmt = nullptr;
-  if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
-    err = sqlite3_errmsg(db);
-    sqlite3_close(db);
-    return nlohmann::json::array();
-  }
-
-  const int nCols = sqlite3_column_count(stmt);
-  std::vector<std::string> colNames;
-  colNames.reserve(static_cast<size_t>(nCols));
-  for (int i = 0; i < nCols; ++i) {
-    const char* name = sqlite3_column_name(stmt, i);
-    colNames.emplace_back(name ? name : "");
-  }
-
-  nlohmann::json rows = nlohmann::json::array();
-  int rc = SQLITE_OK;
-  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-    nlohmann::json row = nlohmann::json::object();
-    for (int i = 0; i < nCols; ++i) {
-      const std::string& name = colNames[static_cast<size_t>(i)];
-      switch (sqlite3_column_type(stmt, i)) {
-        case SQLITE_INTEGER:
-          row[name] = sqlite3_column_int64(stmt, i);
-          break;
-        case SQLITE_FLOAT:
-          row[name] = sqlite3_column_double(stmt, i);
-          break;
-        case SQLITE_NULL:
-          row[name] = nullptr;
-          break;
-        default: {
-          const unsigned char* text = sqlite3_column_text(stmt, i);
-          row[name] = text ? reinterpret_cast<const char*>(text) : "";
-          break;
-        }
-      }
-    }
-    rows.push_back(std::move(row));
-  }
-  if (rc != SQLITE_DONE) err = sqlite3_errmsg(db);
-
-  sqlite3_finalize(stmt);
-  sqlite3_close(db);
-  return rows;
 }
 
 } // namespace
@@ -130,20 +71,22 @@ ToolDefinition makeSqlQueryTool(const std::string& configuredDbPath) {
             {"content", "(sql_query rejected: only SELECT/PRAGMA statements are allowed)"}};
       }
 
-      std::string err;
-      nlohmann::json rows = queryRows(path, sql, err);
-      if (!err.empty()) {
-        return nlohmann::json{{"content", "(sql_query failed: " + err + ")"}};
+      // Execute inside the sandbox: the agent process never runs model-
+      // controlled operations itself; the helper enforces read-only SQLite.
+      const std::string reply =
+          sandboxExecute(nlohmann::json{{"op", "sql_query"},
+                                        {"sql", sql},
+                                        {"db_path", path}}
+                             .dump());
+      auto j = nlohmann::json::parse(reply, nullptr, false);
+      if (!j.is_discarded() && j.is_object() && j.contains("ok") &&
+          j["ok"].is_boolean() && j["ok"].get<bool>()) {
+        return nlohmann::json{{"content", j.value("output", "")}};
       }
-
-      nlohmann::json out = {{"db", path}, {"count", rows.size()}, {"rows", rows}};
-      std::string text = out.dump();
-      constexpr size_t kMax = 30000;
-      if (text.size() > kMax) {
-        text.resize(kMax);
-        text += "\n...(truncated)";
-      }
-      return nlohmann::json{{"content", text}};
+      return nlohmann::json{
+          {"content", !j.is_discarded() && j.is_object()
+                          ? j.value("error", "(sandbox error)")
+                          : reply}};
     } catch (const std::exception& ex) {
       return nlohmann::json{{"content", std::string("(sql_query failed: ") + ex.what() + ")"}};
     }

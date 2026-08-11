@@ -22,6 +22,11 @@ if (-not $SkipUnityBuild) {
 
 Write-Host "==> 2/4 verify IL2CPP layout"
 $gameAssembly = Join-Path $build "GameAssembly.dll"
+# Unity may still be flushing large IL2CPP outputs to disk when its process
+# exits; poll briefly before declaring the build missing.
+for ($i = 0; $i -lt 20 -and -not (Test-Path $gameAssembly); $i++) {
+  Start-Sleep -Milliseconds 500
+}
 if (-not (Test-Path $gameAssembly)) {
   throw "GameAssembly.dll not found in Build root. Expected IL2CPP backend; check scriptingBackend = IL2CPP in ProjectSettings."
 }

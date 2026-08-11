@@ -262,6 +262,14 @@ public class HandPanelUI : MonoBehaviour
     // Whether this turn has used a tool ("检索" stage). Kept for the meta
     // display (procbar only; the in-statusbar pstep dots were removed).
     private bool procSawRetrieve_ = false;
+    // Marquee scroll state: when the thought stream is wider than the panel,
+    // the text scrolls horizontally so updates stay visible (one line only).
+    // The scroll position is CONTINUOUS: it is kept across tool-call refreshes
+    // and new content continues from where it stopped; only a new turn
+    // ("understand") resets it.
+    private float procScrollX = 0f;
+    private float procScrollTarget = 0f;      // max offset = textW - contentW
+    private const float procScrollSpeed = 45f; // px/s
 
     public void SetProcessingStage(string stage, string thought = null)
     {
@@ -270,6 +278,7 @@ public class HandPanelUI : MonoBehaviour
         {
             procFadeStart = Time.unscaledTime;
             procSawRetrieve_ = false;
+            ResetProcScroll();
             return;
         }
         ShowProcessing(true);
@@ -280,7 +289,8 @@ public class HandPanelUI : MonoBehaviour
             ? (stage switch { "understand" => "正在理解…", "retrieve" => "正在检索…", _ => "正在生成…" })
             : thought);
         // Width: min 300 (default length), max fills the row (684 - 34*2 margins).
-        // If the text doesn't fit, Ellipsis overflow truncates the tail.
+        // If the text doesn't fit, the marquee scroll reveals it progressively
+        // (mask + horizontal scroll) instead of truncating the tail.
         procbarText.ForceMeshUpdate();
         var procbar = procbarText.transform.parent;
         var rt = procbar.GetComponent<RectTransform>();
@@ -296,6 +306,18 @@ public class HandPanelUI : MonoBehaviour
                     new Color(0.953f, 0.902f, 0f, 0.4f),
                     new Color(0.016f, 0.024f, 0.055f, 0.9f));
         }
+        // Marquee: keep the scroll position continuous. A new turn starts at
+        // the left; every other update (thinking growth, tool refresh, resume)
+        // continues from the current offset so already-read content is not
+        // shown again.
+        if (stage == "understand")
+        {
+            procScrollX = 0f;
+        }
+        procScrollTarget = Mathf.Max(0f, procbarText.preferredWidth - (w - 24f));
+        if (procScrollX > procScrollTarget)
+            procScrollX = procScrollTarget;  // text got shorter (e.g. tool stage): clamp
+        ApplyProcScroll();
     }
 
     public void ShowProcessing(bool show)
@@ -315,7 +337,23 @@ public class HandPanelUI : MonoBehaviour
     {
         procFadeStart = -1f;
         procSawRetrieve_ = false;
+        ResetProcScroll();
         ShowProcessing(false);
+    }
+
+    void ResetProcScroll()
+    {
+        procScrollX = 0f;
+        procScrollTarget = 0f;
+        ApplyProcScroll();
+    }
+
+    void ApplyProcScroll()
+    {
+        if (procbarText == null) return;
+        var ptRT = procbarText.rectTransform;
+        ptRT.offsetMin = new Vector2(12f - procScrollX, ptRT.offsetMin.y);
+        ptRT.offsetMax = new Vector2(-12f - procScrollX, ptRT.offsetMax.y);
     }
 
     public void UpdateProcessing()
@@ -328,12 +366,23 @@ public class HandPanelUI : MonoBehaviour
                 procbarCanvasGroup.alpha = 0f;
                 procbarCanvasGroup.gameObject.SetActive(false);
                 procFadeStart = -1f;
+                ResetProcScroll();
                 ShowProcessing(false);
             }
             else
             {
                 procbarCanvasGroup.alpha = 1f - t / procFadeDuration;
             }
+        }
+        // Marquee: advance until the tail; stop there. New content (a longer
+        // thought stream) raises the target on the next SetProcessingStage and
+        // scrolling resumes from the current offset automatically.
+        if (procScrollTarget > 0f && procScrollX < procScrollTarget)
+        {
+            procScrollX += procScrollSpeed * Time.unscaledDeltaTime;
+            if (procScrollX >= procScrollTarget)
+                procScrollX = procScrollTarget;
+            ApplyProcScroll();
         }
     }
 

@@ -14,8 +14,11 @@
 #include "base64.hpp"
 #include "builtin_tools.hpp"
 #include "convert_tools.hpp"
+#include "hook_tools.hpp"
 #include "image_utils.hpp"
 #include "prompts.hpp"
+#include "registry.hpp"
+#include "skills.hpp"
 #include "sqlite_tools.hpp"
 #include "system_control.hpp"
 namespace aoi {
@@ -28,6 +31,45 @@ namespace {
 const std::string SYSTEM_PROMPT = prompt::SYSTEMPrompt();
 const std::string TRANSLATOR_SYSTEM_PROMPT = prompt::TRANSLATORPrompt();
 const std::string FRAME_DESCRIBER_SYSTEM_PROMPT = prompt::FRAME_DESCRIBEPrompt();
+
+// ---- AGENTS.md auto-injection (user-editable extra system prompt) ----
+// The file lives in the sandbox workspace so the USER edits it; the sandbox
+// user (model processes) is DENIED write access to it (see windows_sandbox),
+// preventing self prompt-injection. Injected into the system prompt, which is
+// sent on every request and never enters the visible history, so it survives
+// history compression.
+constexpr size_t kAgentMdMaxBytes = 8000;  // bound the injection size
+
+std::string agentExeDir() {
+  char buf[MAX_PATH]{};
+  if (GetModuleFileNameA(nullptr, buf, MAX_PATH) > 0) {
+    std::string dir(buf);
+    const size_t slash = dir.find_last_of("\\/");
+    if (slash != std::string::npos) return dir.substr(0, slash + 1);
+  }
+  return "";
+}
+
+std::string loadAgentMd() {
+  const std::string dir = agentExeDir();
+  if (dir.empty()) return "";
+  const std::string path = dir + "sandbox\\AGENTS.md";
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return "";
+  std::string content((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+  if (content.size() > kAgentMdMaxBytes) {
+    // Cut on a UTF-8 character boundary so injected CJK text is never split
+    // mid-sequence (would corrupt the system prompt encoding).
+    size_t end = kAgentMdMaxBytes;
+    while (end > 0 && (static_cast<unsigned char>(content[end]) & 0xC0) == 0x80)
+      --end;
+    content.resize(end);
+    content += "\n...(truncated: AGENTS.md exceeds " +
+               std::to_string(kAgentMdMaxBytes) + " bytes)";
+  }
+  return content;
+}
 
 const char* const ANSI_RESET = "\x1b[0m";
 const char* const ANSI_BOLD = "\x1b[1m";
@@ -130,19 +172,74 @@ bool AoiAgent::start() {
   sessionConfig_.apiKey = apiKey_;
   sessionConfig_.systemPrompt = SYSTEM_PROMPT;
 
-  // Tools
-  sessionConfig_.tools.push_back(makeReadTool());
-  sessionConfig_.tools.push_back(makeBashTool());
-  sessionConfig_.tools.push_back(makeEditTool());
-  sessionConfig_.tools.push_back(makeWriteTool());
-  sessionConfig_.tools.push_back(makeSqlQueryTool(fileConfig_.vrcxDbPath));
-  sessionConfig_.tools.push_back(makeConvertTool());
-  sessionConfig_.tools.push_back(makeScreenshotTool());
-  sessionConfig_.tools.push_back(makeSystemTool());
-  sessionConfig_.tools.push_back(makeInterpretationTool());
-  sessionConfig_.tools.push_back(makeAwarenessTool());
-  sessionConfig_.tools.push_back(makeContextTool());
-  sessionConfig_.tools.push_back(makeVrSetBrightnessTool());
+  // Timer-hook scheduler: dedicated thread; hooks persist in <exeDir>/agent.db.
+  if (fileConfig_.hooks.enabled) {
+    HookConfig hc;
+    hc.maxHooks = fileConfig_.hooks.maxHooks;
+    hc.dailyBudget = fileConfig_.hooks.dailyBudget;
+    hc.silentStart = fileConfig_.hooks.silentStart;
+    hc.silentEnd = fileConfig_.hooks.silentEnd;
+    char exeBuf[MAX_PATH]{};
+    std::string hookDb = "agent.db";
+    if (GetModuleFileNameA(nullptr, exeBuf, MAX_PATH) > 0) {
+      std::string dir(exeBuf);
+      const size_t slash = dir.find_last_of("\\/");
+      if (slash != std::string::npos) dir = dir.substr(0, slash + 1);
+      hookDb = dir + "agent.db";
+    }
+    hookScheduler_ = std::make_unique<HookScheduler>(hookDb, hc);
+    // Hook LLM orchestration: independent session, SAME system prompt (incl.
+    // AGENTS.md) and SAME tool set as normal user messages - no privilege
+    // change. Runs on the scheduler thread, isolated from the main session.
+    hookScheduler_->setCallbacks(
+        [this](const std::string& intent, const std::string& context) -> std::string {
+          LlmSession::Config sc = sessionConfig_;
+          sc.systemPrompt = buildSystemPrompt();
+          sc.thinking = fileConfig_.llm.thinking;
+          sc.reasoningEffort = fileConfig_.llm.reasoningEffort;
+          auto s = std::make_shared<LlmSession>(sc);
+          s->setCancelSource([this]() { return !running_.load(); });
+          s->setLogSink([this](const std::string& line) { debug("[LLM][hook] %s\n", line.c_str()); });
+          return promptSubSession(s, "[Hook fired] 意图: " + intent + "\n" + context, {});
+        },
+        [this](const std::string& text) {
+          // Interface #2: panel notification (thread-safe sink; bypasses the
+          // message-loop reply state machine).
+          send(MessageType::AssistantResponse,
+               nlohmann::json{{"text", text}, {"partial", false}});
+          send(MessageType::ProcessingStage, nlohmann::json{{"stage", "done"}});
+        },
+        [this](const std::string& line) { debug("%s\n", line.c_str()); });
+    hookScheduler_->start();
+  }
+
+  // Tools, from the registry: system_registry.json (read-only for the sandbox
+  // user) + sandbox/user_registry.json (editable inside the sandbox). User
+  // entries override system entries; missing files keep everything enabled.
+  ensureDefaultRegistries(workDir_ + "\\system_registry.json",
+                          agentExeDir() + "sandbox\\user_registry.json");
+  // Skill roots: sandbox/skills (system, read-only for the sandbox user,
+  // deny-write enforced in windows_sandbox) + sandbox/skills_user (user,
+  // writable inside the sandbox).
+  ensureSkillDirs(agentExeDir() + "sandbox\\skills",
+                  agentExeDir() + "sandbox\\skills_user");
+  const ToolRegistry registry =
+      loadRegistries(workDir_ + "\\system_registry.json",
+                     agentExeDir() + "sandbox\\user_registry.json");
+  for (auto& [name, factory] : makeToolFactories()) {
+    if (!registry.toolEnabled(name)) {
+      debug("[Agent] tool '%s' disabled by registry\n", name.c_str());
+      continue;
+    }
+    ToolDefinition t = factory();
+    if (const ToolEntry* e = registry.findTool(name)) {
+      if (e->hasLabel) t.label = e->label;
+      if (e->hasDescription) t.description = e->description;
+      if (e->hasParameters && e->parameters.is_object())
+        t.parameters = e->parameters;
+    }
+    sessionConfig_.tools.push_back(std::move(t));
+  }
 
   session_ = std::make_shared<LlmSession>(sessionConfig_);
   // Abort the main session's in-flight LLM HTTP as soon as stop() flips
@@ -151,6 +248,18 @@ bool AoiAgent::start() {
   session_->setCancelSource([this]() { return !running_.load(); });
   session_->setLogSink([this](const std::string& line) { debug("[LLM] %s\n", line.c_str()); });
   session_->subscribe([this](const SessionEvent& e) { handleSessionEvent(e, true); });
+
+  // Persistent conversation history next to the agent exe (memory across
+  // restarts; audio/image parts are not persisted, only text).
+  {
+    char exeBuf[MAX_PATH]{};
+    if (GetModuleFileNameA(nullptr, exeBuf, MAX_PATH) > 0) {
+      std::string dir(exeBuf);
+      const size_t slash = dir.find_last_of("\\/");
+      if (slash != std::string::npos) dir = dir.substr(0, slash + 1);
+      session_->setHistoryFile(dir + "history.json");
+    }
+  }
 
   // In-process transport: the C ABI wires setOutboundSink + sendJson. There is
   // no named pipe anymore, so we are "connected" once start() runs.
@@ -247,20 +356,41 @@ bool AoiAgent::sendJson(const std::string& json) {
 }
 
 void AoiAgent::stop() {
+  debug("[Agent] stop: begin\n");
   if (!running_.exchange(false)) return;
+  debug("[Agent] stop: running=false\n");
   if (interpreter_) interpreter_->abort();
   interpActive_ = false;
   if (awareness_) awareness_->stop();
+  if (hookScheduler_) hookScheduler_->stop();
   if (session_) session_->dispose();
+  debug("[Agent] stop: disposed\n");
   mic_.abort();
+  debug("[Agent] stop: mic aborted\n");
   inProcessConnected_ = false;
   if (tts_) tts_->abort();
+  debug("[Agent] stop: tts aborted\n");
   {
     std::lock_guard<std::mutex> lk(ttsMutex_);
     ttsStopRequested_ = true;
     ttsQueue_.clear();
   }
   stopPlayback();
+  debug("[Agent] stop: playback stopped\n");
+  // Reject pending Unity requests BEFORE joining the message thread: a
+  // requestFromUnity() blocked in wait_for(70s) on the msg thread would
+  // otherwise stall the join (and stop()) for the full timeout. Resolving
+  // here unblocks the tool call, the prompt gets cancelled, and the thread
+  // exits promptly.
+  {
+    std::lock_guard<std::mutex> lk(pendingMutex_);
+    for (auto& [id, prom] : pendingRequests_) {
+      if (prom) {
+        try { prom->set_value(nlohmann::json{{"error", "Agent stopped"}}); } catch (...) {}
+      }
+    }
+    pendingRequests_.clear();
+  }
   // Wake + join the message worker.
   {
     std::lock_guard<std::mutex> lk(msgMutex_);
@@ -268,17 +398,11 @@ void AoiAgent::stop() {
   }
   msgCv_.notify_all();
   if (msgThread_.joinable()) msgThread_.join();
+  debug("[Agent] stop: msgThread joined\n");
   // Join background workers (TTS/translation) BEFORE this is destroyed, so they
   // never touch a freed AoiAgent. The cancel checks make them exit promptly.
   joinWorkers();
-  // Reject pending requests.
-  std::lock_guard<std::mutex> lk(pendingMutex_);
-  for (auto& [id, prom] : pendingRequests_) {
-    if (prom) {
-      try { prom->set_value(nlohmann::json{{"error", "Agent stopped"}}); } catch (...) {}
-    }
-  }
-  pendingRequests_.clear();
+  debug("[Agent] stop: workers joined\n");
 }
 
 void AoiAgent::onConnected() {
@@ -542,6 +666,52 @@ void AoiAgent::stopAndProcess() {
   busy_ = false;
 }
 
+// Combine the base system prompt with the user-editable AGENTS.md content.
+std::string AoiAgent::buildSystemPrompt() const {
+  std::string sp = SYSTEM_PROMPT;
+  // Agent Skills (open standard: SKILL.md catalog with progressive
+  // disclosure). Reloaded every turn so edits to sandbox/skills and
+  // sandbox/skills_user apply immediately; enablement rules come from the
+  // "skills" section of both registries.
+  const SkillRules rules = loadSkillRules(workDir_ + "\\system_registry.json",
+                                          agentExeDir() + "sandbox\\user_registry.json");
+  std::vector<SkillDef> skills = loadSkills(agentExeDir() + "sandbox\\skills",
+                                            agentExeDir() + "sandbox\\skills_user");
+  applySkillRules(skills, rules);
+  const std::string catalog = renderAvailableSkills(skills, rules.includeInstructions);
+  if (!catalog.empty()) sp += "\n\n" + catalog;
+  const std::string md = loadAgentMd();
+  if (!md.empty()) {
+    sp += "\n\n# 用户自定义指令\n编辑 sandbox\\AGENTS.md 可修改以下内容：\n" + md;
+  }
+  return sp;
+}
+
+// Tool factories keyed by tool name; the registry decides which are
+// registered and may override their label/description/parameters.
+std::vector<std::pair<std::string, std::function<ToolDefinition()>>>
+AoiAgent::makeToolFactories() {
+  using Fac = std::function<ToolDefinition()>;
+  std::vector<std::pair<std::string, Fac>> f;
+  f.emplace_back("read", [] { return makeReadTool(); });
+  f.emplace_back("bash", [] { return makeBashTool(); });
+  f.emplace_back("edit", [] { return makeEditTool(); });
+  f.emplace_back("write", [] { return makeWriteTool(); });
+  f.emplace_back("sql_query", [this] { return makeSqlQueryTool(fileConfig_.vrcxDbPath); });
+  f.emplace_back("convert", [] { return makeConvertTool(); });
+  f.emplace_back("screenshot", [this] { return makeScreenshotTool(); });
+  f.emplace_back("system", [this] { return makeSystemTool(); });
+  f.emplace_back("interpretation", [this] { return makeInterpretationTool(); });
+  f.emplace_back("awareness", [this] { return makeAwarenessTool(); });
+  f.emplace_back("context", [this] { return makeContextTool(); });
+  f.emplace_back("vr_set_brightness", [this] { return makeVrSetBrightnessTool(); });
+  if (hookScheduler_) {
+    f.emplace_back("hook_manage",
+                   [this] { return makeHookManageTool(hookScheduler_.get()); });
+  }
+  return f;
+}
+
 void AoiAgent::handleUserInput(const Message& msg) {
   const std::string text = msg.payload.value("text", "");
   if (text.empty()) return;
@@ -557,11 +727,20 @@ void AoiAgent::handleUserInput(const Message& msg) {
        nlohmann::json{{"stage", "understand"}, {"thought", "正在理解你的问题…"}});
   thinkingText_.clear();
   try {
+    // AGENTS.md auto-injection: re-read the user-editable instructions before
+    // every turn so edits apply immediately. The system prompt is sent on
+    // every request and never enters the visible history, so it survives
+    // history compression untouched.
+    session_->setSystemPrompt(buildSystemPrompt());
     session_->prompt(contextPrefix() + text);
   } catch (const std::exception& ex) {
     debug("[Agent] prompt error: %s\n", ex.what());
     if (!sawAnyTextDelta_) {
       sendFinalText(std::string("（处理失败：") + ex.what() + "）");
+    } else {
+      // Partial text already streamed and agent_end will never arrive: close
+      // the message so the UI does not stay stuck on a partial state.
+      sendFinalText(fullResponse_.empty() ? "（处理中断）" : fullResponse_);
     }
     send(MessageType::ProcessingStage, nlohmann::json{{"stage", "done"}});
     processingStageSentGenerate_ = false;
@@ -740,10 +919,18 @@ void AoiAgent::enqueueTts(const std::string& text) {
     // earlier interrupted batch, so this reply is not silently swallowed.
     ttsStopRequested_ = false;
     ttsQueue_.push_back(clean);
-    if (ttsPlaying_) return;
+    // Take over the playback right only when no LIVE worker owns it. A stale
+    // worker (interrupted by stopTts/stop) may still be draining its speak()
+    // HTTP call; when it returns it exits because its gen is stale. If we
+    // only looked at ttsPlaying_, that stale worker's exit would leave
+    // ttsPlaying_ true forever and every later enqueue would return early -
+    // permanent silence (the queue never gets a consumer).
+    if (ttsPlaying_ && ttsOwnerGen_ == ttsGeneration_.load()) return;
     ttsPlaying_ = true;
+    const int gen = ttsGeneration_.fetch_add(1) + 1;
+    ttsOwnerGen_ = gen;
   }
-  const int gen = ttsGeneration_.fetch_add(1) + 1;
+  const int gen = ttsGeneration_.load();
   spawnWorker(std::thread([this, gen]() {
     for (;;) {
       std::string next;
@@ -751,11 +938,13 @@ void AoiAgent::enqueueTts(const std::string& text) {
         std::lock_guard<std::mutex> lk(ttsMutex_);
         // A newer generation superseded us, or a stop was requested: exit.
         if (ttsQueue_.empty() || ttsStopRequested_ || gen != ttsGeneration_) {
-          // Clear the playing flag whenever we're the last thing in the queue,
-          // REGARDLESS of generation: a stale worker must not leave
-          // ttsPlaying_ stuck true (that would make every later enqueueTts
-          // return early and the reply would show text with no voice).
-          if (ttsQueue_.empty()) ttsPlaying_ = false;
+          // Relinquish the playback right ONLY if we still own it - a newer
+          // worker must never have its state cleared by an old one. A stale
+          // owner leaves the right for the next enqueue to take over.
+          if (ttsOwnerGen_ == gen) {
+            ttsPlaying_ = false;
+            ttsOwnerGen_ = 0;
+          }
           break;
         }
         next = ttsQueue_.front();

@@ -2,6 +2,7 @@
 
 #include <curl/curl.h>
 
+#include <cctype>
 #include <cstring>
 #include <mutex>
 
@@ -26,6 +27,28 @@ int progressCallback(void* userdata, curl_off_t, curl_off_t, curl_off_t, curl_of
   auto* ctx = static_cast<HttpClient::StreamCtx*>(userdata);
   if (ctx->cancel && ctx->cancel()) return 1;
   return 0;
+}
+
+// Header callback: collect response headers (lowercased keys) so the caller
+// can honor Retry-After. Status lines ("HTTP/1.1 429 ...") are skipped.
+size_t headerCallback(char* ptr, size_t size, size_t nmemb, void* userdata) {
+  auto* out = static_cast<std::vector<std::pair<std::string, std::string>>*>(userdata);
+  const size_t n = size * nmemb;
+  std::string line(ptr, n);
+  if (line.size() >= 2 && line.compare(line.size() - 2, 2, "\r\n") == 0)
+    line.resize(line.size() - 2);
+  const size_t colon = line.find(':');
+  if (colon != std::string::npos) {
+    std::string key = line.substr(0, colon);
+    std::string val = line.substr(colon + 1);
+    for (auto& c : key) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const size_t b = val.find_first_not_of(" \t");
+    if (b != std::string::npos) val = val.substr(b);
+    const size_t e = val.find_last_not_of(" \t");
+    if (e != std::string::npos) val = val.substr(0, e + 1);
+    out->push_back({key, val});
+  }
+  return n;
 }
 
 } // namespace
@@ -69,6 +92,7 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
   StreamCtx ctx;
   ctx.onData = std::move(onData);
   ctx.cancel = std::move(cancel);
+  std::vector<std::pair<std::string, std::string>> resultHeaders;
 
   CURL* curl = static_cast<CURL*>(handle());
   if (!curl) {
@@ -84,6 +108,8 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
+  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+  curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resultHeaders);
   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progressCallback);
   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &ctx);
   curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
@@ -94,15 +120,9 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
   // encoding keeps the raw SSE bytes flowing.
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
 
-  // Timeouts: connect 15s (fast fail on unreachable provider). NO low-speed
-  // guard: the opencode gateway's SSE stream routinely pauses for minutes
-  // between the tool-call announce chunk and the argument deltas (the model
-  // deliberates on the arguments / gateway buffering). A low-speed guard
-  // (45s, then 300s) killed those requests mid-stream and lost the tool
-  // arguments (announce-only bug); Python's urllib has no such guard and
-  // never failed. SSE stays open as long as the connection lives, so a dead
-  // stream is only detected by the connect timeout / cancellation.
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+  // NO connect timeout and NO low-speed guard: aligned with opencode on Bun,
+  // which waits indefinitely. A stalled/hung stream is terminated only by
+  // cancellation or the caller's retry budget.
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
 
   // Headers.
@@ -132,8 +152,11 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
     result.status = -1;
   } else {
     result.status = static_cast<long>(status > 0 ? status : (res == CURLE_OK ? 0 : -1000));
+    if (res != CURLE_OK) result.error = curl_easy_strerror(res);
   }
+  result.curlCode = static_cast<int>(res);
   result.body = std::move(ctx.body);
+  result.headers = std::move(resultHeaders);
 
   if (headerList) curl_slist_free_all(headerList);
   return result;

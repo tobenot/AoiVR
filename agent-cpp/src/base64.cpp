@@ -24,7 +24,20 @@ bool isValidBase64(const std::string& in) {
     if (eq != std::string::npos) return false;  // data after '=' is invalid
   }
   if (eq != std::string::npos && in.size() - eq > 2) return false;  // max 2 padding
-  return !in.empty();
+  if (in.empty()) return false;
+  // Length sanity (RFC 4648): total length must be a multiple of 4 when
+  // padded; unpadded lengths ≡1 (mod 4) encode no bytes and always indicate
+  // corruption (the underlying decoder would silently truncate them).
+  const size_t dataLen = eq == std::string::npos ? in.size() : eq;
+  if (eq == std::string::npos) {
+    if (in.size() % 4 == 1) return false;
+  } else {
+    if (in.size() % 4 != 0) return false;
+  }
+  // Padding must not exceed the data it pads (a pure "=" / "==" input would
+  // make the decoder's length math underflow to SIZE_MAX).
+  if (eq != std::string::npos && in.size() - eq >= dataLen) return false;
+  return true;
 }
 
 } // namespace

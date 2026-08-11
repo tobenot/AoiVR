@@ -50,13 +50,18 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     cfg.llm.model = get(llm, "model", cfg.llm.model);
     const std::string t = get(llm, "thinking", cfg.llm.thinking);
     if (t == "enabled" || t == "disabled" || t == "auto") cfg.llm.thinking = t;
-    const std::string e = get(llm, "reasoningEffort", "");
-    if (e.empty()) {
-      // Explicit "" disables reasoning_effort (provider default) — do NOT
-      // fall back to the built-in "low".
-      cfg.llm.reasoningEffort = "";
-    } else if (e == "low" || e == "medium" || e == "high") {
-      cfg.llm.reasoningEffort = e;
+    // reasoningEffort: only overridden when the key is EXPLICITLY present.
+    // An explicit "" disables reasoning_effort (provider default); an ABSENT
+    // key keeps the built-in default - get() cannot distinguish the two.
+    if (llm.contains("reasoningEffort")) {
+      const std::string e = llm["reasoningEffort"].is_string()
+                                ? llm["reasoningEffort"].get<std::string>()
+                                : "";
+      if (e.empty()) {
+        cfg.llm.reasoningEffort = "";
+      } else if (e == "low" || e == "medium" || e == "high") {
+        cfg.llm.reasoningEffort = e;
+      }
     }
   }
   if (root.is_object() && root.contains("tts") && root["tts"].is_object()) {
@@ -74,6 +79,36 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     cfg.tts.voice = get(tts, "voice", cfg.tts.voice);
   }
   cfg.vrcxDbPath = get(root, "vrcxDbPath", "");
+  if (root.is_object() && root.contains("hooks") && root["hooks"].is_object()) {
+    const auto& h = root["hooks"];
+    if (h.contains("enabled")) {
+      if (h["enabled"].is_boolean()) cfg.hooks.enabled = h["enabled"].get<bool>();
+      else if (h["enabled"].is_string()) {
+        const std::string v = h["enabled"].get<std::string>();
+        if (v == "false" || v == "0" || v == "off") cfg.hooks.enabled = false;
+      }
+    }
+    cfg.hooks.maxHooks = h.value("maxHooks", cfg.hooks.maxHooks);
+    cfg.hooks.dailyBudget = h.value("dailyBudget", cfg.hooks.dailyBudget);
+    if (h.contains("silentHours") && h["silentHours"].is_object()) {
+      cfg.hooks.silentStart = h["silentHours"].value("start", cfg.hooks.silentStart);
+      cfg.hooks.silentEnd = h["silentHours"].value("end", cfg.hooks.silentEnd);
+    }
+    cfg.hooks.scriptTimeoutSeconds =
+        h.value("scriptTimeoutSeconds", cfg.hooks.scriptTimeoutSeconds);
+    cfg.hooks.scriptOutputLimitBytes =
+        h.value("scriptOutputLimitBytes", cfg.hooks.scriptOutputLimitBytes);
+    // Range-clamp: invalid values would silently disable ALL hooks
+    // (dailyBudget<=0 makes every fire skipped, silentEnd>23 silences
+    // everything, maxHooks<=0 rejects every create).
+    if (cfg.hooks.maxHooks < 1) cfg.hooks.maxHooks = 1;
+    if (cfg.hooks.dailyBudget < 1) cfg.hooks.dailyBudget = 1;
+    cfg.hooks.silentStart = (cfg.hooks.silentStart + 24) % 24;
+    cfg.hooks.silentEnd = (cfg.hooks.silentEnd + 24) % 24;
+    if (cfg.hooks.scriptTimeoutSeconds < 1) cfg.hooks.scriptTimeoutSeconds = 30;
+    if (cfg.hooks.scriptOutputLimitBytes < 1024)
+      cfg.hooks.scriptOutputLimitBytes = 30 * 1024;
+  }
   return cfg;
 }
 

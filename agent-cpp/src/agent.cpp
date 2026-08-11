@@ -17,8 +17,8 @@
 #include "fetch_tools.hpp"
 #include "hook_tools.hpp"
 #include "image_utils.hpp"
+#include "m4a_encoder.hpp"
 #include "mic.hpp"
-#include "mp3_encoder.hpp"
 #include "prompts.hpp"
 #include "registry.hpp"
 #include "skills.hpp"
@@ -567,7 +567,7 @@ void AoiAgent::startRecording() {
   if (busy_) return;
   debug("[Agent] Recording...\n");
   sendTuiFeed(std::string(ANSI_GRAY) + "(recording...)" + ANSI_RESET + "\n");
-    if (!mic_.running()) mic_.start(44100);
+    if (!mic_.running()) mic_.start(48000);
 }
 
 void AoiAgent::stopAndProcess() {
@@ -598,12 +598,17 @@ void AoiAgent::stopAndProcess() {
 
   std::vector<ContentPart> parts;
   // Audio block: MiMo input_audio format (data:{MIME};base64,... prefix kept).
-  // The mic captures 44.1k directly; the built-in WMF MP3 encoder accepts it
-  // natively (no resampling), and mp3 is ~7x smaller than 16k wav (~79KB vs
-  // 553KB per 17s), which keeps history/cache payloads small. If WMF encoding
-  // fails, fall back to 16k -> 8k decimated wav (still intelligible speech).
+  // The mic captures 48k mono (WASAPI engine resamples; the built-in AAC
+  // encoder only accepts 44.1k/48k). Media Foundation's SinkWriter encodes it
+  // to 64kbps AAC/M4A automatically (official pipeline, zero hand-written
+  // DSP). M4A is tiny (~136KB per 17s, base64 well under the 50MB provider
+  // limit); audio costs ~6.25 tokens/sec regardless of format since the
+  // provider re-resamples everything to its native 24 kHz - speech energy is
+  // all below 12 kHz so 48k->24k loses nothing. Keeping history audio (no
+  // fold) is therefore cheap. If AAC encoding fails, fall back to 8k mono wav
+  // via miniaudio's resampler (verified, no hand-written DSP).
   const std::vector<uint8_t>& rawWav = result.wavBuffer;
-  std::vector<uint8_t> mp3, wav8;
+  std::vector<uint8_t> m4a, wav8;
   const uint8_t* audioData = rawWav.data();
   size_t audioLen = rawWav.size();
   std::string mime = "audio/wav";
@@ -616,48 +621,32 @@ void AoiAgent::stopAndProcess() {
                         (static_cast<uint16_t>(rawWav[23]) << 8);
     const uint16_t bits = static_cast<uint16_t>(rawWav[34]) |
                           (static_cast<uint16_t>(rawWav[35]) << 8);
-    if (bits == 16 && (rate == 44100 || rate == 48000)) {
+    if (bits == 16 && rate > 0) {
       std::vector<int16_t> pcm((rawWav.size() - 44) / 2);
       std::memcpy(pcm.data(), rawWav.data() + 44, pcm.size() * 2);
-      const std::string mp3Path = workDir_ + "\\aoi_rec.mp3";
-      if (encodeMp3(pcm, rate, ch, mp3Path)) {
-        std::ifstream f(mp3Path, std::ios::binary);
+      const std::string m4aPath = workDir_ + "\\aoi_rec.m4a";
+      if (encodeM4a(pcm, rate, ch, m4aPath)) {
+        std::ifstream f(m4aPath, std::ios::binary);
         if (f) {
-          mp3.assign((std::istreambuf_iterator<char>(f)),
+          m4a.assign((std::istreambuf_iterator<char>(f)),
                      std::istreambuf_iterator<char>());
-          audioData = mp3.data();
-          audioLen = mp3.size();
-          mime = "audio/mpeg";
+          audioData = m4a.data();
+          audioLen = m4a.size();
+          mime = "audio/mp4";
         }
         std::error_code ec;
-        std::filesystem::remove(mp3Path, ec);
+        std::filesystem::remove(m4aPath, ec);
       }
     }
   }
-  if (mime != "audio/mpeg" && rawWav.size() > 44) {
-    // Fallback: 16k -> 8k decimation, halving the base64 payload.
-    const uint8_t* wavData = rawWav.data();
-    const size_t wavLen = rawWav.size();
-    wav8.resize(44 + (wavLen - 44) / 2);
-    std::memcpy(wav8.data(), wavData, 44);
-    const uint32_t dataSize8 = static_cast<uint32_t>((wavLen - 44) / 2);
-    const uint32_t riffSize8 = 36 + dataSize8;
-    auto put32 = [](uint8_t* p, uint32_t v) {
-      p[0] = static_cast<uint8_t>(v);
-      p[1] = static_cast<uint8_t>(v >> 8);
-      p[2] = static_cast<uint8_t>(v >> 16);
-      p[3] = static_cast<uint8_t>(v >> 24);
-    };
-    put32(&wav8[4], riffSize8);
-    put32(&wav8[24], 8000);
-    put32(&wav8[28], 16000);
-    put32(&wav8[40], dataSize8);
-    for (size_t i = 44, o = 44; i + 1 < wavLen; i += 4, o += 2) {
-      wav8[o] = wavData[i];
-      wav8[o + 1] = wavData[i + 1];
+  if (mime != "audio/mp4" && rawWav.size() > 44) {
+    // Fallback: convert to 8k mono wav via miniaudio's resampler + channel
+    // converter (verified implementations - no hand-written decimation), so
+    // the base64 payload stays small even when AAC encoding fails.
+    if (wavTo8kMono(rawWav, wav8)) {
+      audioData = wav8.data();
+      audioLen = wav8.size();
     }
-    audioData = wav8.data();
-    audioLen = wav8.size();
   }
   ContentPart audio;
   audio.type = "audio";

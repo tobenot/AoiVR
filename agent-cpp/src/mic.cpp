@@ -11,6 +11,7 @@ namespace aoi {
 namespace {
 struct MicCtx {
   MicCapture* self = nullptr;
+  ma_uint32 channels = 1;
 };
 
 void captureCallback(ma_device* device, void* pOutput, const void* pInput,
@@ -19,8 +20,11 @@ void captureCallback(ma_device* device, void* pOutput, const void* pInput,
   auto* ctx = static_cast<MicCtx*>(device->pUserData);
   if (!ctx || !ctx->self) return;
   if (!pInput || frameCount == 0) return;
-  // Configured ma_format_s16 mono at sampleRate_.
-  const size_t bytes = static_cast<size_t>(frameCount) * sizeof(int16_t);
+  // Configured ma_format_s16 with N channels at sampleRate_. WASAPI shared
+  // mode lets the Windows audio engine do all resampling/channel mixing, so
+  // the callback delivers exactly what we asked for (24k mono s16).
+  const size_t bytes = static_cast<size_t>(frameCount) * ctx->channels *
+                       sizeof(int16_t);
   std::lock_guard<std::mutex> lk(ctx->self->resultMutex());
   auto& pcm = ctx->self->pcm();
   pcm.insert(pcm.end(), static_cast<const uint8_t*>(pInput),
@@ -61,6 +65,7 @@ void MicCapture::recordLoop() {
 
   MicCtx ctx;
   ctx.self = this;
+  ctx.channels = 1;
   config.pUserData = &ctx;
 
   ma_device device;

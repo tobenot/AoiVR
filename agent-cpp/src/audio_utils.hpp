@@ -20,6 +20,12 @@ std::vector<uint8_t> buildWavFromPcm(const std::vector<uint8_t>& pcm);
 std::vector<uint8_t> buildWavHeader(uint32_t dataLen, uint32_t sampleRate,
                                     uint16_t channels, uint16_t bitsPerSample);
 
+// Convert any 16-bit PCM wav (1-2 channels, any sample rate) to an 8k mono
+// 16-bit wav. Uses miniaudio's verified resampler + channel converter
+// (ma_resampler / ma_channel_converter) - no hand-written DSP. Returns false
+// on unsupported input (non-16-bit, >2 channels, empty).
+bool wavTo8kMono(const std::vector<uint8_t>& wav, std::vector<uint8_t>& out);
+
 // A FIFO of float samples fed to the VAD, split into fixed-size chunks.
 // Mirrors audio-utils.ts FloatRingBuffer.
 class FloatRingBuffer {

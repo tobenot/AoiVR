@@ -38,7 +38,10 @@ bool drainOutput(IMFTransform* enc, FILE* f, bool* wroteAny) {
     Microsoft::WRL::ComPtr<IMFMediaBuffer> ob;
     DWORD status = 0;
     if (FAILED(MFCreateSample(&out))) return false;
-    if (FAILED(MFCreateMemoryBuffer(16384, &ob))) return false;
+    // The MP3 encoder MFT packs ALL frames of an input sample into ONE output
+    // sample (0.5s in = ~19KB out). A smaller buffer silently truncates the
+    // tail of the audio (16384 gave ~50% duration loss); use 64KB.
+    if (FAILED(MFCreateMemoryBuffer(65536, &ob))) return false;
     if (FAILED(out->AddBuffer(ob.Get()))) return false;
     odb.pSample = out.Get();
     const HRESULT hr = enc->ProcessOutput(0, 1, &odb, &status);
@@ -109,7 +112,14 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
     if (coInit) CoUninitialize();
     return false;
   }
-  hr = enc->SetOutputType(0, out.Get(), 0);
+  // 128 kbps: the provider re-resamples everything down to 24 kHz (native
+  // MiMo-Audio rate) anyway, so a 320 kbps default is pure upload waste.
+  // Speech at 128 kbps stays clean; ~32KB per 17s vs 79KB at 320k.
+  Microsoft::WRL::ComPtr<IMFMediaType> mp3Type;
+  MFCreateMediaType(&mp3Type);
+  out->CopyAllItems(mp3Type.Get());
+  mp3Type->SetUINT32(MF_MT_AVG_BITRATE, 128000);
+  hr = enc->SetOutputType(0, mp3Type.Get(), 0);
   if (FAILED(hr)) {
     if (coInit) CoUninitialize();
     return false;
@@ -176,31 +186,27 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
         break;
       }
       const int16_t* src = pcm.data() + off;
-      if (inChannels == channels) {
-        std::memcpy(ptr, src, n * frameBytes);
-      } else if (inChannels == 2 && channels == 1) {
-        auto* dst = reinterpret_cast<int16_t*>(ptr);
-        for (size_t i = 0; i < n; ++i) {
-          dst[2 * i] = src[i];
-          dst[2 * i + 1] = src[i];
-        }
-      } else if (inChannels == 1 && channels == 2) {
-        auto* dst = reinterpret_cast<int16_t*>(ptr);
-        for (size_t i = 0; i < n; ++i) {
-          dst[i] = static_cast<int16_t>(
-              (static_cast<int>(src[2 * i]) + static_cast<int>(src[2 * i + 1])) / 2);
-        }
-      } else {
+      // The encoder's negotiated input format is its native one (44.1k/48k
+      // stereo s16). No hand-written conversion here: WASAPI delivers exactly
+      // this format from the mic, and if a caller passes anything else we
+      // fail and the caller falls back to sending wav.
+      if (inChannels != channels) {
         buf->Unlock();
         failed = true;
         break;
       }
+      std::memcpy(ptr, src, n * frameBytes);
       buf->SetCurrentLength(static_cast<DWORD>(n * frameBytes));
       buf->Unlock();
 
       Microsoft::WRL::ComPtr<IMFSample> sample;
       MFCreateSample(&sample);
       sample->AddBuffer(buf.Get());
+      // The MP3 encoder MFT requires monotonically increasing timestamps;
+      // without them later input samples are silently dropped (4s of input
+      // produced only ~1.7s of output).
+      sample->SetSampleTime(static_cast<LONGLONG>(off) * 10000000 / sampleRate);
+      sample->SetSampleDuration(static_cast<LONGLONG>(n) * 10000000 / sampleRate);
       const HRESULT pi = enc->ProcessInput(0, sample.Get(), 0);
       if (FAILED(pi)) {
         // MF_E_NOTACCEPTING usually means we must drain first; loop again.

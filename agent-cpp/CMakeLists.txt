@@ -25,6 +25,7 @@ add_executable(aoi-agent
   src/speaker.cpp
   src/miniaudio_impl.cpp
   src/mp3_encoder.cpp
+  src/m4a_encoder.cpp
   src/tts.cpp
   src/sherpa_asr.cpp
   src/builtin_tools.cpp
@@ -129,6 +130,7 @@ set(AOI_AGENT_SOURCES
   src/speaker.cpp
   src/miniaudio_impl.cpp
   src/mp3_encoder.cpp
+  src/m4a_encoder.cpp
   src/tts.cpp
   src/sherpa_asr.cpp
   src/builtin_tools.cpp
@@ -289,9 +291,11 @@ add_executable(aoi-smoke-tests
   src/audio_utils.cpp
   src/agent_utils.cpp
   src/image_utils.cpp
+  src/miniaudio_impl.cpp
 )
-target_include_directories(aoi-smoke-tests PRIVATE src third_party third_party/nlohmann third_party/stb third_party/base64)
+target_include_directories(aoi-smoke-tests PRIVATE src third_party third_party/nlohmann third_party/stb third_party/base64 third_party/miniaudio)
 target_compile_definitions(aoi-smoke-tests PRIVATE NOMINMAX STB_IMAGE_IMPLEMENTATION STB_IMAGE_WRITE_IMPLEMENTATION)
+target_link_libraries(aoi-smoke-tests PRIVATE winmm ole32)
 if(MSVC)
   target_compile_options(aoi-smoke-tests PRIVATE /utf-8 /permissive-)
 endif()
@@ -377,6 +381,18 @@ if(MSVC)
   target_compile_options(aoi-mp3-test PRIVATE /utf-8 /permissive-)
 endif()
 target_link_libraries(aoi-mp3-test PRIVATE mfplat mfreadwrite mf mfuuid)
+
+# Dev tool: Media Foundation SinkWriter AAC/M4A encoder test (24k mono).
+add_executable(aoi-m4a-test
+  tests/m4a_test.cpp
+  src/m4a_encoder.cpp
+)
+target_include_directories(aoi-m4a-test PRIVATE src third_party)
+target_compile_definitions(aoi-m4a-test PRIVATE NOMINMAX)
+if(MSVC)
+  target_compile_options(aoi-m4a-test PRIVATE /utf-8 /permissive-)
+endif()
+target_link_libraries(aoi-m4a-test PRIVATE mfplat mfreadwrite mf mfuuid)
 
 add_executable(aoi-dll-tests
   tests/dll_test.cpp

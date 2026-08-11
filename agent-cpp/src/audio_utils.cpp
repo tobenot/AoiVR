@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 
+#include <miniaudio.h>
+
 namespace aoi {
 
 std::vector<float> pcm16ToFloat32(const uint8_t* buf, size_t len) {
@@ -93,6 +95,66 @@ std::vector<float> FloatRingBuffer::take(size_t n) {
 void FloatRingBuffer::reset() {
   bufs_.clear();
   total_ = 0;
+}
+
+bool wavTo8kMono(const std::vector<uint8_t>& wav, std::vector<uint8_t>& out) {
+  if (wav.size() <= 44) return false;
+  const uint32_t rate = static_cast<uint32_t>(wav[24]) |
+                        (static_cast<uint32_t>(wav[25]) << 8) |
+                        (static_cast<uint32_t>(wav[26]) << 16) |
+                        (static_cast<uint32_t>(wav[27]) << 24);
+  const uint16_t ch = static_cast<uint16_t>(wav[22]) |
+                      (static_cast<uint16_t>(wav[23]) << 8);
+  const uint16_t bits = static_cast<uint16_t>(wav[34]) |
+                        (static_cast<uint16_t>(wav[35]) << 8);
+  if (bits != 16 || ch == 0 || ch > 2 || rate == 0) return false;
+  const size_t frames = (wav.size() - 44) / (static_cast<size_t>(ch) * 2);
+  if (frames == 0) return false;
+  const auto* pcm = reinterpret_cast<const int16_t*>(wav.data() + 44);
+
+  // 1) Channel conversion (e.g. stereo -> mono, miniaudio mixes channels).
+  ma_channel_converter_config ccfg = ma_channel_converter_config_init(
+      ma_format_s16, ch, nullptr, 1, nullptr, ma_channel_mix_mode_default);
+  ma_channel_converter cc;
+  if (ma_channel_converter_init(&ccfg, nullptr, &cc) != MA_SUCCESS) return false;
+  std::vector<int16_t> mono(frames);
+  const ma_uint64 nFrames = frames;
+  const ma_result rc =
+      ma_channel_converter_process_pcm_frames(&cc, mono.data(), pcm, nFrames);
+  ma_channel_converter_uninit(&cc, nullptr);
+  if (rc != MA_SUCCESS) return false;
+
+  // 2) Resampling to 8k (miniaudio's linear-interpolation resampler).
+  ma_resampler_config rcfg = ma_resampler_config_init(
+      ma_format_s16, 1, rate, 8000, ma_resample_algorithm_linear);
+  ma_resampler rs;
+  if (ma_resampler_init(&rcfg, nullptr, &rs) != MA_SUCCESS) return false;
+  const size_t outCap = frames * 8000 / rate + 8192;
+  std::vector<int16_t> outPcm(outCap);
+  ma_uint64 consumed = 0, produced = 0;
+  bool ok = false;
+  while (consumed < frames) {
+    ma_uint64 inF = frames - consumed;
+    ma_uint64 outF = outCap - produced;
+    if (outF == 0) break;
+    const ma_result rr = ma_resampler_process_pcm_frames(
+        &rs, mono.data() + consumed, &inF, outPcm.data() + produced, &outF);
+    if (rr != MA_SUCCESS) break;
+    consumed += inF;
+    produced += outF;
+    if (inF == 0 && outF == 0) break;
+  }
+  ma_resampler_uninit(&rs, nullptr);
+  if (consumed < frames || produced == 0) return false;
+
+  const auto header =
+      buildWavHeader(static_cast<uint32_t>(produced * 2), 8000, 1, 16);
+  out.clear();
+  out.reserve(header.size() + produced * 2);
+  out.insert(out.end(), header.begin(), header.end());
+  out.insert(out.end(), reinterpret_cast<const uint8_t*>(outPcm.data()),
+             reinterpret_cast<const uint8_t*>(outPcm.data()) + produced * 2);
+  return true;
 }
 
 } // namespace aoi

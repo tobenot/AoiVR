@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <string>
+#include <system_error>
 
 #include <miniaudio.h>
 

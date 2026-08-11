@@ -206,26 +206,32 @@ nlohmann::json LlmSession::buildRequest(const std::vector<ChatMessage>& history)
           //   {"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}
           // data is the RAW base64 payload (NO "data:audio/wav;base64," prefix),
           // and there IS a `format` field. The piped-through dataUrl carries the
-          // prefix, so strip it here.
+          // prefix, so strip it here. Upstream accepts format in
+          // {mp3, flac, wav, ogg} (verified live: wav/mp3/flac HTTP 200).
+          // M4A/AAC data is rejected ("Param Incorrect"), so never emit it.
           std::string audioData = p.dataUrl;
           // Detect the media subtype from the data: URL prefix only
-          // ("data:audio/mpeg;base64," or "data:audio/wav;base64,"). Never
-          // scan the base64 payload itself (it could coincidentally contain
-          // "mp3" as text and mis-route the format).
-          bool isMp3 = false;
+          // ("data:audio/flac;base64," etc). Never scan the base64 payload
+          // itself (it could coincidentally contain "mp3" as text and
+          // mis-route the format).
+          std::string format = "wav";
           const std::string prefix = "data:audio/";
           if (audioData.rfind(prefix, 0) == 0) {
             const size_t semi = audioData.find(';', prefix.size());
             const std::string subtype = audioData.substr(
                 prefix.size(), semi == std::string::npos ? std::string::npos : semi - prefix.size());
-            isMp3 = subtype.find("mpeg") != std::string::npos ||
-                    subtype.find("mp3") != std::string::npos;
+            if (subtype.find("flac") != std::string::npos) {
+              format = "flac";
+            } else if (subtype.find("mpeg") != std::string::npos ||
+                       subtype.find("mp3") != std::string::npos) {
+              format = "mp3";
+            }
             const size_t comma = audioData.find(",", prefix.size());
             if (comma != std::string::npos) audioData = audioData.substr(comma + 1);
           }
           content.push_back({{"type", "input_audio"},
                              {"input_audio", {{"data", audioData},
-                                              {"format", isMp3 ? "mp3" : "wav"}}}});
+                                              {"format", format}}}});
         }
       }
       jm["content"] = content;

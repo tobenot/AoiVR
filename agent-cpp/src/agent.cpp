@@ -17,7 +17,6 @@
 #include "fetch_tools.hpp"
 #include "hook_tools.hpp"
 #include "image_utils.hpp"
-#include "m4a_encoder.hpp"
 #include "mic.hpp"
 #include "prompts.hpp"
 #include "registry.hpp"
@@ -567,7 +566,7 @@ void AoiAgent::startRecording() {
   if (busy_) return;
   debug("[Agent] Recording...\n");
   sendTuiFeed(std::string(ANSI_GRAY) + "(recording...)" + ANSI_RESET + "\n");
-    if (!mic_.running()) mic_.start(48000);
+    if (!mic_.running()) mic_.start(24000);
 }
 
 void AoiAgent::stopAndProcess() {
@@ -597,64 +596,24 @@ void AoiAgent::stopAndProcess() {
   finalSent_ = false;
 
   std::vector<ContentPart> parts;
-  // Audio block: MiMo input_audio format (data:{MIME};base64,... prefix kept).
-  // The mic captures 48k mono (WASAPI engine resamples; the built-in AAC
-  // encoder only accepts 44.1k/48k). Media Foundation's SinkWriter encodes it
-  // to 64kbps AAC/M4A automatically (official pipeline, zero hand-written
-  // DSP). M4A is tiny (~136KB per 17s, base64 well under the 50MB provider
-  // limit); audio costs ~6.25 tokens/sec regardless of format since the
-  // provider re-resamples everything to its native 24 kHz - speech energy is
-  // all below 12 kHz so 48k->24k loses nothing. Keeping history audio (no
-  // fold) is therefore cheap. If AAC encoding fails, fall back to 8k mono wav
-  // via miniaudio's resampler (verified, no hand-written DSP).
+  // Audio block: MiMo input_audio wire format (input_audio.data = raw base64,
+  // format=wav). The mic captures 24k mono - the provider's native
+  // MiMo-Audio rate (24000 Hz): audio is re-resampled to 24k server-side
+  // anyway, so capturing at 24k loses nothing and needs zero resampling.
+  // WAV is sent as-is (verified live: format=wav HTTP 200; M4A/AAC data is
+  // rejected by the provider, and no dependency ships an mp3/flac encoder -
+  // miniaudio's ma_encoder only implements WAV). 24k mono 16-bit = 48KB/s
+  // (~829KB per 17s, base64 ~1.1MB, well under the 50MB provider limit;
+  // audio costs ~6.25 tokens/sec regardless of format, so keeping history
+  // audio (no fold) is cheap).
   const std::vector<uint8_t>& rawWav = result.wavBuffer;
-  std::vector<uint8_t> m4a, wav8;
-  const uint8_t* audioData = rawWav.data();
-  size_t audioLen = rawWav.size();
-  std::string mime = "audio/wav";
-  if (rawWav.size() > 44) {
-    const uint32_t rate = static_cast<uint32_t>(rawWav[24]) |
-                          (static_cast<uint32_t>(rawWav[25]) << 8) |
-                          (static_cast<uint32_t>(rawWav[26]) << 16) |
-                          (static_cast<uint32_t>(rawWav[27]) << 24);
-    const uint16_t ch = static_cast<uint16_t>(rawWav[22]) |
-                        (static_cast<uint16_t>(rawWav[23]) << 8);
-    const uint16_t bits = static_cast<uint16_t>(rawWav[34]) |
-                          (static_cast<uint16_t>(rawWav[35]) << 8);
-    if (bits == 16 && rate > 0) {
-      std::vector<int16_t> pcm((rawWav.size() - 44) / 2);
-      std::memcpy(pcm.data(), rawWav.data() + 44, pcm.size() * 2);
-      const std::string m4aPath = workDir_ + "\\aoi_rec.m4a";
-      if (encodeM4a(pcm, rate, ch, m4aPath)) {
-        std::ifstream f(m4aPath, std::ios::binary);
-        if (f) {
-          m4a.assign((std::istreambuf_iterator<char>(f)),
-                     std::istreambuf_iterator<char>());
-          audioData = m4a.data();
-          audioLen = m4a.size();
-          mime = "audio/mp4";
-        }
-        std::error_code ec;
-        std::filesystem::remove(m4aPath, ec);
-      }
-    }
-  }
-  if (mime != "audio/mp4" && rawWav.size() > 44) {
-    // Fallback: convert to 8k mono wav via miniaudio's resampler + channel
-    // converter (verified implementations - no hand-written decimation), so
-    // the base64 payload stays small even when AAC encoding fails.
-    if (wavTo8kMono(rawWav, wav8)) {
-      audioData = wav8.data();
-      audioLen = wav8.size();
-    }
-  }
   ContentPart audio;
   audio.type = "audio";
-  audio.dataUrl = "data:" + mime + ";base64," +
-                  base64Encode(audioData, audioLen);
+  audio.dataUrl = "data:audio/wav;base64," +
+                  base64Encode(rawWav.data(), rawWav.size());
   parts.push_back(audio);
-  debug("[Agent] audio %zu bytes -> %s %zu bytes\n",
-        result.wavBuffer.size(), mime.c_str(), audioLen);
+  debug("[Agent] audio %zu bytes -> audio/wav %zu bytes\n",
+        result.wavBuffer.size(), rawWav.size());
 
   std::string shotNote;
   if (!pendingShotPath_.empty()) {

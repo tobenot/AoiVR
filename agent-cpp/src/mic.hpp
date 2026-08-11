@@ -11,14 +11,12 @@ namespace aoi {
 
 struct MicResult {
   std::vector<uint8_t> wavBuffer;  // complete 44-byte header + PCM
-  // Capture sample rate. 48000 Hz: the built-in AAC encoder (SinkWriter)
-  // only accepts 44.1k/48k, and WASAPI shared mode has the Windows audio
-  // engine do the resampling (verified, zero hand-written DSP). The provider
-  // re-resamples everything to its native 24 kHz MiMo rate anyway - speech
-  // energy is all below 12 kHz, so 48k -> 24k loses nothing. AAC bitrate
-  // (64kbps) is independent of sample rate, so upload size is identical to
-  // a 24k encode.
-  int sampleRate = 48000;
+  // Capture sample rate. 24000 Hz is the provider's native MiMo-Audio
+  // tokenizer rate ("sampling_rate": 24000): audio is re-resampled to 24k
+  // server-side anyway, and FLAC encoding (miniaudio ma_encoder) accepts any
+  // rate - so capturing at 24k needs zero resampling anywhere in the
+  // pipeline, and the provider decodes it at its native rate.
+  int sampleRate = 24000;
 };
 // Records microphone audio via miniaudio ma_device_type_capture (see
 // THIRD_PARTY_NOTICES.md section 8) into a WAV buffer. Mirrors mic.ts.
@@ -30,7 +28,7 @@ class MicCapture {
   MicCapture(const MicCapture&) = delete;
   MicCapture& operator=(const MicCapture&) = delete;
 
-  bool start(int sampleRate = 48000);
+  bool start(int sampleRate = 24000);
   MicResult stop();
   void abort();
 
@@ -50,10 +48,10 @@ class MicCapture {
   std::mutex mtx_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stopRequested_{false};
-  int sampleRate_ = 48000;
+  int sampleRate_ = 24000;
   // PCM bytes: 16-bit LE, mono, at sampleRate_. WASAPI shared mode delivers
-  // exactly this format (engine handles resampling/mixing), which is also the
-  // native input format of the AAC encoder - no conversion anywhere.
+  // exactly this format (engine handles resampling/mixing), which FLAC
+  // encodes directly - no conversion anywhere.
   std::vector<uint8_t> pcm_;
   std::mutex resultMutex_;
 };

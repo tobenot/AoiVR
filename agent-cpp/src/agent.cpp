@@ -17,6 +17,8 @@
 #include "fetch_tools.hpp"
 #include "hook_tools.hpp"
 #include "image_utils.hpp"
+#include "mic.hpp"
+#include "mp3_encoder.hpp"
 #include "prompts.hpp"
 #include "registry.hpp"
 #include "skills.hpp"
@@ -565,7 +567,7 @@ void AoiAgent::startRecording() {
   if (busy_) return;
   debug("[Agent] Recording...\n");
   sendTuiFeed(std::string(ANSI_GRAY) + "(recording...)" + ANSI_RESET + "\n");
-  if (!mic_.running()) mic_.start(16000);
+    if (!mic_.running()) mic_.start(44100);
 }
 
 void AoiAgent::stopAndProcess() {
@@ -596,19 +598,48 @@ void AoiAgent::stopAndProcess() {
 
   std::vector<ContentPart> parts;
   // Audio block: MiMo input_audio format (data:{MIME};base64,... prefix kept).
-  // Downsample 16k -> 8k BEFORE sending: halves the base64 payload (~96KB ->
-  // 48KB per 3s of speech), which halves the per-turn prompt-cache miss caused
-  // by audio folding in history (the folded placeholder replaces the raw
-  // base64 in the cache key; smaller payload = smaller cache break). 8k 16-bit
-  // mono stays intelligible for speech.
+  // The mic captures 44.1k directly; the built-in WMF MP3 encoder accepts it
+  // natively (no resampling), and mp3 is ~7x smaller than 16k wav (~79KB vs
+  // 553KB per 17s), which keeps history/cache payloads small. If WMF encoding
+  // fails, fall back to 16k -> 8k decimated wav (still intelligible speech).
   const std::vector<uint8_t>& rawWav = result.wavBuffer;
-  std::vector<uint8_t> wav8;
-  const uint8_t* wavData = rawWav.data();
-  size_t wavLen = rawWav.size();
-  if (wavLen > 44) {
+  std::vector<uint8_t> mp3, wav8;
+  const uint8_t* audioData = rawWav.data();
+  size_t audioLen = rawWav.size();
+  std::string mime = "audio/wav";
+  if (rawWav.size() > 44) {
+    const uint32_t rate = static_cast<uint32_t>(rawWav[24]) |
+                          (static_cast<uint32_t>(rawWav[25]) << 8) |
+                          (static_cast<uint32_t>(rawWav[26]) << 16) |
+                          (static_cast<uint32_t>(rawWav[27]) << 24);
+    const uint16_t ch = static_cast<uint16_t>(rawWav[22]) |
+                        (static_cast<uint16_t>(rawWav[23]) << 8);
+    const uint16_t bits = static_cast<uint16_t>(rawWav[34]) |
+                          (static_cast<uint16_t>(rawWav[35]) << 8);
+    if (bits == 16 && (rate == 44100 || rate == 48000)) {
+      std::vector<int16_t> pcm((rawWav.size() - 44) / 2);
+      std::memcpy(pcm.data(), rawWav.data() + 44, pcm.size() * 2);
+      const std::string mp3Path = workDir_ + "\\aoi_rec.mp3";
+      if (encodeMp3(pcm, rate, ch, mp3Path)) {
+        std::ifstream f(mp3Path, std::ios::binary);
+        if (f) {
+          mp3.assign((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+          audioData = mp3.data();
+          audioLen = mp3.size();
+          mime = "audio/mpeg";
+        }
+        std::error_code ec;
+        std::filesystem::remove(mp3Path, ec);
+      }
+    }
+  }
+  if (mime != "audio/mpeg" && rawWav.size() > 44) {
+    // Fallback: 16k -> 8k decimation, halving the base64 payload.
+    const uint8_t* wavData = rawWav.data();
+    const size_t wavLen = rawWav.size();
     wav8.resize(44 + (wavLen - 44) / 2);
     std::memcpy(wav8.data(), wavData, 44);
-    // Patch the header: sample rate 8000, byte rate 16000, data size halved.
     const uint32_t dataSize8 = static_cast<uint32_t>((wavLen - 44) / 2);
     const uint32_t riffSize8 = 36 + dataSize8;
     auto put32 = [](uint8_t* p, uint32_t v) {
@@ -618,24 +649,23 @@ void AoiAgent::stopAndProcess() {
       p[3] = static_cast<uint8_t>(v >> 24);
     };
     put32(&wav8[4], riffSize8);
-    put32(&wav8[24], 8000);   // sample rate
-    put32(&wav8[28], 16000);  // byte rate = 8000 * 1 ch * 2 bytes
+    put32(&wav8[24], 8000);
+    put32(&wav8[28], 16000);
     put32(&wav8[40], dataSize8);
-    // Take every 2nd 16-bit sample (linear decimation of 16k -> 8k).
     for (size_t i = 44, o = 44; i + 1 < wavLen; i += 4, o += 2) {
       wav8[o] = wavData[i];
       wav8[o + 1] = wavData[i + 1];
     }
-    wavData = wav8.data();
-    wavLen = wav8.size();
+    audioData = wav8.data();
+    audioLen = wav8.size();
   }
   ContentPart audio;
   audio.type = "audio";
-  audio.dataUrl = "data:audio/wav;base64," +
-                  base64Encode(wavData, wavLen);
+  audio.dataUrl = "data:" + mime + ";base64," +
+                  base64Encode(audioData, audioLen);
   parts.push_back(audio);
-  debug("[Agent] audio wav %zu -> %zu bytes (16k->8k)\n",
-        result.wavBuffer.size(), wavLen);
+  debug("[Agent] audio %zu bytes -> %s %zu bytes\n",
+        result.wavBuffer.size(), mime.c_str(), audioLen);
 
   std::string shotNote;
   if (!pendingShotPath_.empty()) {

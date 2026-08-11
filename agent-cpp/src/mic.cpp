@@ -99,7 +99,10 @@ MicResult MicCapture::stop() {
   running_ = false;
   std::lock_guard<std::mutex> lk2(resultMutex_);
   MicResult res;
-  res.wavBuffer = buildWavFromPcm(pcm_);
+  std::vector<uint8_t> header =
+      buildWavHeader(static_cast<uint32_t>(pcm_.size()), sampleRate_, 1, 16);
+  res.wavBuffer = header;
+  res.wavBuffer.insert(res.wavBuffer.end(), pcm_.begin(), pcm_.end());
   res.sampleRate = sampleRate_;
   pcm_.clear();
   return res;

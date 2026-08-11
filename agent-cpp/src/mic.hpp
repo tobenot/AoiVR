@@ -11,7 +11,10 @@ namespace aoi {
 
 struct MicResult {
   std::vector<uint8_t> wavBuffer;  // complete 44-byte header + PCM
-  int sampleRate = 16000;
+  // Capture sample rate. 44100 Hz: the built-in WMF MP3 encoder accepts
+  // 44.1k/48k input directly (no resampling), so recordings are encoded to
+  // mp3 end-to-end.
+  int sampleRate = 44100;
 };
 
 // Records microphone audio via miniaudio ma_device_type_capture (see
@@ -24,7 +27,7 @@ class MicCapture {
   MicCapture(const MicCapture&) = delete;
   MicCapture& operator=(const MicCapture&) = delete;
 
-  bool start(int sampleRate = 16000);
+  bool start(int sampleRate = 44100);
   MicResult stop();
   void abort();
 

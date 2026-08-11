@@ -801,16 +801,15 @@ bool hasAudioParts(const ChatMessage& m) {
 
 std::vector<ChatMessage> LlmSession::foldMultimodalHistory(
     const std::vector<ChatMessage>& history) const {
-  // Speech is NEVER carried in history again: every audio-bearing user
-  // message EXCEPT the current turn (the last user message, which the model
-  // must hear NOW) is folded down to its text part on send.
-  // Images (screenshots) are NOT folded: verified live that long image_url
-  // content DOES hit the gateway's prompt-prefix cache (1000x1000 PNG:
-  // 1920/1937 cached on repeat), so keeping them in history keeps the
-  // prefix stable and fully cacheable as the conversation grows.
-  // EXPERIMENT SWITCH (cache_lab): AOI_NO_FOLD keeps historical audio in the
-  // request verbatim to measure fold-vs-keep effects on cache & TTFT.
-  if (std::getenv("AOI_NO_FOLD")) return history;
+  // Product default: keep historical audio verbatim (no folding). Verified in
+  // the cache lab: no-fold + mp3 gives 87-93% prompt-cache hits with stable
+  // TTFT (3.1-5.6s) over 10 turns, while folding breaks the cache chain every
+  // turn because the folded placeholder never matches the raw base64 of the
+  // earlier turn (folded runs: cached stuck at 1024 or ~81% hit rate with
+  // growing TTFT). Audio is mp3 now (~79KB/17s), so keeping history audio is
+  // cheap. Images stay in history either way (verified cacheable).
+  // Legacy switch: AOI_FOLD=1 restores the old fold-to-text behavior.
+  if (!std::getenv("AOI_FOLD")) return history;
   // Locate the current-turn user message: the LAST user message in history.
   size_t lastUserIdx = history.size();
   for (size_t i = history.size(); i-- > 0;) {

@@ -24,6 +24,7 @@ add_executable(aoi-agent
   src/player.cpp
   src/speaker.cpp
   src/miniaudio_impl.cpp
+  src/mp3_encoder.cpp
   src/tts.cpp
   src/sherpa_asr.cpp
   src/builtin_tools.cpp
@@ -96,6 +97,10 @@ target_link_libraries(aoi-agent PRIVATE
   advapi32
   crypt32
   user32
+  mfplat
+  mfreadwrite
+  mf
+  mfuuid
 )
 
 # Optional sherpa-onnx (local ASR/VAD). Enabled when the library is provided.
@@ -123,6 +128,7 @@ set(AOI_AGENT_SOURCES
   src/player.cpp
   src/speaker.cpp
   src/miniaudio_impl.cpp
+  src/mp3_encoder.cpp
   src/tts.cpp
   src/sherpa_asr.cpp
   src/builtin_tools.cpp
@@ -175,6 +181,10 @@ target_link_libraries(aoi-agent-dll PRIVATE
   advapi32
   crypt32
   user32
+  mfplat
+  mfreadwrite
+  mf
+  mfuuid
 )
 if(MSVC)
   target_compile_options(aoi-agent-dll PRIVATE /utf-8 /permissive-)
@@ -342,6 +352,31 @@ if(MSVC)
   target_compile_options(aoi-cache-lab PRIVATE /utf-8 /permissive-)
 endif()
 target_link_libraries(aoi-cache-lab PRIVATE CURL::libcurl ws2_32)
+
+# Dev tool: generate a real speech wav via MiMo TTS for cache experiments.
+add_executable(aoi-tts-gen
+  tests/tts_gen.cpp
+  src/base64.cpp
+  src/http_client.cpp
+  src/tts.cpp
+)
+target_include_directories(aoi-tts-gen PRIVATE src third_party third_party/nlohmann third_party/base64)
+if(MSVC)
+  target_compile_options(aoi-tts-gen PRIVATE /utf-8 /permissive-)
+endif()
+target_link_libraries(aoi-tts-gen PRIVATE CURL::libcurl ws2_32)
+
+# Dev tool: WMF mp3 encoder feasibility test.
+add_executable(aoi-mp3-test
+  tests/mp3_test.cpp
+  src/mp3_encoder.cpp
+)
+target_include_directories(aoi-mp3-test PRIVATE src third_party)
+target_compile_definitions(aoi-mp3-test PRIVATE NOMINMAX)
+if(MSVC)
+  target_compile_options(aoi-mp3-test PRIVATE /utf-8 /permissive-)
+endif()
+target_link_libraries(aoi-mp3-test PRIVATE mfplat mfreadwrite mf mfuuid)
 
 add_executable(aoi-dll-tests
   tests/dll_test.cpp

@@ -18,6 +18,7 @@
 #include "hook_tools.hpp"
 #include "image_utils.hpp"
 #include "mic.hpp"
+#include "mp3_encoder.hpp"
 #include "prompts.hpp"
 #include "registry.hpp"
 #include "skills.hpp"
@@ -566,7 +567,7 @@ void AoiAgent::startRecording() {
   if (busy_) return;
   debug("[Agent] Recording...\n");
   sendTuiFeed(std::string(ANSI_GRAY) + "(recording...)" + ANSI_RESET + "\n");
-    if (!mic_.running()) mic_.start(24000);
+    if (!mic_.running()) mic_.start(32000);
 }
 
 void AoiAgent::stopAndProcess() {
@@ -596,24 +597,55 @@ void AoiAgent::stopAndProcess() {
   finalSent_ = false;
 
   std::vector<ContentPart> parts;
-  // Audio block: MiMo input_audio wire format (input_audio.data = raw base64,
-  // format=wav). The mic captures 24k mono - the provider's native
-  // MiMo-Audio rate (24000 Hz): audio is re-resampled to 24k server-side
-  // anyway, so capturing at 24k loses nothing and needs zero resampling.
-  // WAV is sent as-is (verified live: format=wav HTTP 200; M4A/AAC data is
-  // rejected by the provider, and no dependency ships an mp3/flac encoder -
-  // miniaudio's ma_encoder only implements WAV). 24k mono 16-bit = 48KB/s
-  // (~829KB per 17s, base64 ~1.1MB, well under the 50MB provider limit;
-  // audio costs ~6.25 tokens/sec regardless of format, so keeping history
-  // audio (no fold) is cheap).
+  // Audio block: MiMo input_audio format (data:{MIME};base64,... prefix kept).
+  // The mic captures 32k stereo (WASAPI engine resamples/mixes; the built-in
+  // WMF MP3 encoder MFT supports 32k/44.1k/48k, and 32k is closest to the
+  // provider's native 24 kHz MiMo rate - speech is all below 12 kHz, so the
+  // server-side re-resample loses nothing). 64kbps mp3 = ~136KB per 17s vs
+  // 829KB raw wav; audio costs ~6.25 tokens/sec regardless of format. mp3 is
+  // the only compressed format the provider accepts with an in-tree encoder
+  // (verified live: format=mp3 HTTP 200; M4A/AAC data rejected; miniaudio's
+  // ma_encoder only implements WAV). Keeping history audio (no fold) is
+  // cheap. If WMF encoding fails, send the raw wav.
   const std::vector<uint8_t>& rawWav = result.wavBuffer;
+  std::vector<uint8_t> mp3;
+  const uint8_t* audioData = rawWav.data();
+  size_t audioLen = rawWav.size();
+  std::string mime = "audio/wav";
+  if (rawWav.size() > 44) {
+    const uint32_t rate = static_cast<uint32_t>(rawWav[24]) |
+                          (static_cast<uint32_t>(rawWav[25]) << 8) |
+                          (static_cast<uint32_t>(rawWav[26]) << 16) |
+                          (static_cast<uint32_t>(rawWav[27]) << 24);
+    const uint16_t ch = static_cast<uint16_t>(rawWav[22]) |
+                        (static_cast<uint16_t>(rawWav[23]) << 8);
+    const uint16_t bits = static_cast<uint16_t>(rawWav[34]) |
+                          (static_cast<uint16_t>(rawWav[35]) << 8);
+    if (bits == 16 && (rate == 32000 || rate == 44100 || rate == 48000)) {
+      std::vector<int16_t> pcm((rawWav.size() - 44) / 2);
+      std::memcpy(pcm.data(), rawWav.data() + 44, pcm.size() * 2);
+      const std::string mp3Path = workDir_ + "\\aoi_rec.mp3";
+      if (encodeMp3(pcm, rate, ch, mp3Path)) {
+        std::ifstream f(mp3Path, std::ios::binary);
+        if (f) {
+          mp3.assign((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+          audioData = mp3.data();
+          audioLen = mp3.size();
+          mime = "audio/mpeg";
+        }
+        std::error_code ec;
+        std::filesystem::remove(mp3Path, ec);
+      }
+    }
+  }
   ContentPart audio;
   audio.type = "audio";
-  audio.dataUrl = "data:audio/wav;base64," +
-                  base64Encode(rawWav.data(), rawWav.size());
+  audio.dataUrl = "data:" + mime + ";base64," +
+                  base64Encode(audioData, audioLen);
   parts.push_back(audio);
-  debug("[Agent] audio %zu bytes -> audio/wav %zu bytes\n",
-        result.wavBuffer.size(), rawWav.size());
+  debug("[Agent] audio %zu bytes -> %s %zu bytes\n",
+        result.wavBuffer.size(), mime.c_str(), audioLen);
 
   std::string shotNote;
   if (!pendingShotPath_.empty()) {

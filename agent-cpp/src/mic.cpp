@@ -11,7 +11,7 @@ namespace aoi {
 namespace {
 struct MicCtx {
   MicCapture* self = nullptr;
-  ma_uint32 channels = 1;
+  ma_uint32 channels = 2;
 };
 
 void captureCallback(ma_device* device, void* pOutput, const void* pInput,
@@ -22,7 +22,7 @@ void captureCallback(ma_device* device, void* pOutput, const void* pInput,
   if (!pInput || frameCount == 0) return;
   // Configured ma_format_s16 with N channels at sampleRate_. WASAPI shared
   // mode lets the Windows audio engine do all resampling/channel mixing, so
-  // the callback delivers exactly what we asked for (24k mono s16).
+  // the callback delivers exactly what we asked for (44.1k stereo s16).
   const size_t bytes = static_cast<size_t>(frameCount) * ctx->channels *
                        sizeof(int16_t);
   std::lock_guard<std::mutex> lk(ctx->self->resultMutex());
@@ -59,13 +59,13 @@ bool MicCapture::start(int sampleRate) {
 void MicCapture::recordLoop() {
   ma_device_config config = ma_device_config_init(ma_device_type_capture);
   config.capture.format = ma_format_s16;
-  config.capture.channels = 1;
+  config.capture.channels = 2;
   config.sampleRate = static_cast<ma_uint32>(sampleRate_);
   config.dataCallback = captureCallback;
 
   MicCtx ctx;
   ctx.self = this;
-  ctx.channels = 1;
+  ctx.channels = 2;
   config.pUserData = &ctx;
 
   ma_device device;
@@ -105,7 +105,7 @@ MicResult MicCapture::stop() {
   std::lock_guard<std::mutex> lk2(resultMutex_);
   MicResult res;
   std::vector<uint8_t> header =
-      buildWavHeader(static_cast<uint32_t>(pcm_.size()), sampleRate_, 1, 16);
+      buildWavHeader(static_cast<uint32_t>(pcm_.size()), sampleRate_, 2, 16);
   res.wavBuffer = header;
   res.wavBuffer.insert(res.wavBuffer.end(), pcm_.begin(), pcm_.end());
   res.sampleRate = sampleRate_;

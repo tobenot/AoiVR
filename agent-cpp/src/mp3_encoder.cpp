@@ -67,8 +67,12 @@ bool drainOutput(IMFTransform* enc, FILE* f, bool* wroteAny) {
 bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
                uint32_t channels, const std::string& outPath) {
   if (pcm.empty() || sampleRate == 0 || channels == 0) return false;
-  // The built-in MP3 encoder MFT accepts 44100/48000 Hz input.
-  if (sampleRate != 44100 && sampleRate != 48000) return false;
+  // The built-in MP3 encoder MFT (MPEG-1 Layer III) supports 32/44.1/48 kHz
+  // (verified via GetOutputAvailableType). 32k is used in production: closest
+  // to the provider's native 24 kHz rate, so 32k sampling loses nothing for
+  // speech (energy < 12 kHz) while keeping uploads small.
+  if (sampleRate != 32000 && sampleRate != 44100 && sampleRate != 48000)
+    return false;
 
   HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) return false;
@@ -112,13 +116,17 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
     if (coInit) CoUninitialize();
     return false;
   }
-  // 128 kbps: the provider re-resamples everything down to 24 kHz (native
-  // MiMo-Audio rate) anyway, so a 320 kbps default is pure upload waste.
-  // Speech at 128 kbps stays clean; ~32KB per 17s vs 79KB at 320k.
+  // 64 kbps @ 32 kHz: the provider re-resamples everything down to 24 kHz
+  // (native MiMo-Audio rate) anyway - speech energy is all below 12 kHz, so
+  // 32k sampling loses nothing and 64kbps keeps speech clean. ~136KB per 17s
+  // vs 693KB at 320k. Set BOTH the bitrate and the byte-rate (the enumerated
+  // type carries MF_MT_AUDIO_AVG_BYTES_PER_SECOND, which the encoder reads
+  // first).
   Microsoft::WRL::ComPtr<IMFMediaType> mp3Type;
   MFCreateMediaType(&mp3Type);
   out->CopyAllItems(mp3Type.Get());
-  mp3Type->SetUINT32(MF_MT_AVG_BITRATE, 128000);
+  mp3Type->SetUINT32(MF_MT_AVG_BITRATE, 64000);
+  mp3Type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 8000);
   hr = enc->SetOutputType(0, mp3Type.Get(), 0);
   if (FAILED(hr)) {
     if (coInit) CoUninitialize();
@@ -166,13 +174,17 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
     return false;
   }
 
-  const size_t chunkSamples = sampleRate / 2;  // 0.5s per input sample
+  const size_t chunkFrames = sampleRate / 2;  // 0.5s per input sample
   const size_t frameBytes = static_cast<size_t>(inChannels) * 2;
+  // pcm is int16 elements; a frame is `channels` elements. Count OFF in
+  // FRAMES so timestamps and durations are correct (using element counts
+  // doubles the length for stereo: 17.3s of speech came out as a 34s mp3).
+  const size_t totalFrames = pcm.size() / channels;
   bool failed = false;
   bool wroteAny = false;
   size_t off = 0;
   for (;;) {
-    const size_t n = std::min(chunkSamples, pcm.size() - off);
+    const size_t n = std::min(chunkFrames, totalFrames - off);
     if (n > 0) {
       Microsoft::WRL::ComPtr<IMFMediaBuffer> buf;
       if (FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(n * frameBytes), &buf))) {
@@ -185,7 +197,7 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
         failed = true;
         break;
       }
-      const int16_t* src = pcm.data() + off;
+      const int16_t* src = pcm.data() + off * inChannels;
       // The encoder's negotiated input format is its native one (44.1k/48k
       // stereo s16). No hand-written conversion here: WASAPI delivers exactly
       // this format from the mic, and if a caller passes anything else we
@@ -203,8 +215,7 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
       MFCreateSample(&sample);
       sample->AddBuffer(buf.Get());
       // The MP3 encoder MFT requires monotonically increasing timestamps;
-      // without them later input samples are silently dropped (4s of input
-      // produced only ~1.7s of output).
+      // without them later input samples are silently dropped.
       sample->SetSampleTime(static_cast<LONGLONG>(off) * 10000000 / sampleRate);
       sample->SetSampleDuration(static_cast<LONGLONG>(n) * 10000000 / sampleRate);
       const HRESULT pi = enc->ProcessInput(0, sample.Get(), 0);

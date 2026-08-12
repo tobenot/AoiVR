@@ -733,6 +733,14 @@ int main(int argc, char** argv) {
     reply["ok"] = false;
     reply["error"] = error;
   }
-  std::cout << reply.dump() << std::endl;
+  // Serialize defensively: a malformed payload (e.g. dangling UTF-8 that
+  // slipped past sanitizers) must surface as an error reply, NOT escape the
+  // try block above and abort the helper (0xC0000409 - "no output").
+  try {
+    std::cout << reply.dump() << std::endl;
+  } catch (const std::exception& ex) {
+    std::cout << R"json({"ok":false,"error":"(sandbox helper: reply serialization failed)"})json"
+              << std::endl;
+  }
   return 0;
 }

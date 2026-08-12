@@ -30,8 +30,15 @@ size_t utf8CompleteLength(const std::string& s) {
   if (end == 0) return 0;
   const unsigned char b = static_cast<unsigned char>(s[end - 1]);
   const size_t need = (b >= 0xF0) ? 4 : (b >= 0xE0) ? 3 : (b >= 0xC0) ? 2 : 1;
-  if (end - 1 + need > s.size()) --end;  // trailing lead byte, incomplete seq
-  return end;
+  // end-1 is the LEAD byte of the character containing the cut point. If the
+  // whole character fits (charStart+need <= size), the complete prefix
+  // INCLUDES it (return charStart+need) - returning `end` (=charStart+1)
+  // truncated mid-character and left a dangling lead byte, which broke JSON
+  // dumps downstream (nlohmann type_error.316 -> uncaught -> abort
+  // 0xC0000409, observed as "helper produced no output").
+  const size_t charStart = end - 1;
+  if (charStart + need <= s.size()) return charStart + need;
+  return charStart;
 }
 
 std::string buildContextPrefix(const std::vector<std::string>& history) {

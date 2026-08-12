@@ -498,8 +498,14 @@ void ensureSandboxReady() {
       // the workflow and hallucinated numbers).
       const std::string sysSkills = g_workspacePath + "\\skills";
       { std::error_code ec; std::filesystem::create_directories(sysSkills, ec); }
+      // Precise write-only bits: FILE_GENERIC_WRITE expands to include
+      // SYNCHRONIZE, which is REQUIRED to open a file at all - a DENY on it
+      // blocks reads too (observed: model's read of SKILL.md failed despite
+      // the allow ACE). Keep reads (FILE_READ_DATA/ATTRIBUTES) out of the
+      // deny mask.
       constexpr DWORD kSkillDenyMask =
-          FILE_GENERIC_WRITE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD |
+          FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+          FILE_WRITE_ATTRIBUTES | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD |
           DELETE | WRITE_DAC | WRITE_OWNER;
       if (!applyAceToPath(sysSkills, DENY_ACCESS, kSkillDenyMask,
                           reinterpret_cast<PSID>(userSid.data())))

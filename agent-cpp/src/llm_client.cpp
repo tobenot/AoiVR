@@ -494,10 +494,16 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
     bool shouldRetry = false;
     int delayMs = 0;
     const char* retryLayer = nullptr;
-    // A clean TCP close WITHOUT the [DONE] sentinel or any finish_reason is a
-    // truncated response: never present the partial text as the final answer.
-    if (res.status > 0 && res.curlCode == CURLE_OK && !sawTerminal) {
-      log("[LLM] stream ended without [DONE]/finish_reason (truncated); retrying");
+    // A clean HTTP close WITHOUT the [DONE] sentinel or any finish_reason is
+    // only a real truncation when NOTHING was produced: several stream
+    // endpoints end without the sentinel (or carry finish_reason only as
+    // null), so retrying any no-sentinel response would loop forever - each
+    // retry regenerates the entire reply (minutes with long reasoning).
+    // Retry only when the stream completed with zero content AND zero tool
+    // calls AND no termination marker (an abnormal empty response).
+    if (res.status > 0 && res.curlCode == CURLE_OK && !sawTerminal &&
+        outText.empty() && !sawToolCall) {
+      log("[LLM] stream ended empty without [DONE]/finish_reason; retrying");
       delayMs = 2000 * (1 << streamAttempts);
       delayMs = (std::min)(delayMs, 30000);
       ++streamAttempts;

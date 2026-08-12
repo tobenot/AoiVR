@@ -80,7 +80,7 @@ fetch(url="https://api.vrchat.cloud/api/1/auth/user?apiKey=<key>",
 
 - **User-Agent 必须带联系方式**（项目名 + 仓库/邮箱），否则返回 401。
 - 响应含 `error` 字段即失败；`401` 通常表示 cookie 失效（让用户重新登录 VRCX）。
-- 大响应（世界/好友列表）：把 `fetch` 的 `max_bytes` 调大（如 200000），一次拿全；或分页拉取。
+- 大响应（世界/好友列表）：`fetch` 超限不会丢数据——完整响应自动保存到沙箱 workspace 的 `out\` 目录（返回里带文件路径），用 `read` 工具的 `offset` 参数分页读取；也可以直接把 `max_bytes` 调大（如 200000）一次拿全。
 
 ### 认证过期处理
 

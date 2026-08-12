@@ -23,6 +23,17 @@ void utf8SafeTruncate(std::string& s, size_t maxBytes) {
   s.resize(cut);
 }
 
+size_t utf8CompleteLength(const std::string& s) {
+  size_t end = s.size();
+  while (end > 0 && (static_cast<unsigned char>(s[end - 1]) & 0xC0) == 0x80)
+    --end;
+  if (end == 0) return 0;
+  const unsigned char b = static_cast<unsigned char>(s[end - 1]);
+  const size_t need = (b >= 0xF0) ? 4 : (b >= 0xE0) ? 3 : (b >= 0xC0) ? 2 : 1;
+  if (end - 1 + need > s.size()) --end;  // trailing lead byte, incomplete seq
+  return end;
+}
+
 std::string buildContextPrefix(const std::vector<std::string>& history) {
 
   if (history.empty()) return "";

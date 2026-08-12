@@ -26,4 +26,9 @@ std::vector<std::string> splitSentences(const std::string& s);
 // ("invalid UTF-8 byte at index ...").
 void utf8SafeTruncate(std::string& s, size_t maxBytes);
 
+// Length of the longest prefix of `s` that ends on a complete UTF-8 character
+// (a trailing partial sequence is excluded). Used for byte-paged reads so a
+// page never ends mid-character.
+size_t utf8CompleteLength(const std::string& s);
+
 } // namespace aoi

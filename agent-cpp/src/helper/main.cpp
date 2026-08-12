@@ -25,6 +25,7 @@
 #include <sqlite3.h>
 
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -36,6 +37,7 @@
 #include "agent_utils.hpp"
 
 using json = nlohmann::json;
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -80,32 +82,51 @@ bool isSafeRelativePath(const std::string& path) {
   return true;
 }
 
-std::string readTextFile(const std::string& path, size_t maxBytes = 60000) {
-  std::ifstream f(path, std::ios::binary);
+std::string readTextFile(const std::string& path, size_t offset, size_t maxBytes) {
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
   if (!f.is_open()) return "(file not found: " + path + ")";
+  const size_t total = static_cast<size_t>(f.tellg());
+  if (offset >= total && total > 0)
+    return "(read: offset " + std::to_string(offset) +
+           " beyond end of file; total " + std::to_string(total) + " bytes)";
+  f.seekg(static_cast<std::streamoff>(offset));
   // Bounded read: never pull a huge file fully into memory (a multi-GB file
   // would OOM the helper before the truncation below could apply).
   std::string out;
   out.reserve((std::min)(maxBytes, static_cast<size_t>(4096)));
   char buf[8192];
-  size_t total = 0;
-  while (f) {
-    f.read(buf, sizeof(buf));
+  size_t readBytes = 0;
+  while (f && readBytes < maxBytes) {
+    const size_t want = (std::min)(sizeof(buf), maxBytes - readBytes);
+    f.read(buf, static_cast<std::streamsize>(want));
     const std::streamsize n = f.gcount();
     if (n <= 0) break;
-    const size_t room = maxBytes - (std::min)(maxBytes, total);
-    if (room == 0) break;
-    const size_t take = (std::min)(static_cast<size_t>(n), room);
-    out.append(buf, take);
-    total += take;
-    if (total >= maxBytes) break;
+    out.append(buf, static_cast<size_t>(n));
+    readBytes += static_cast<size_t>(n);
   }
-  if (out.size() >= maxBytes) {
-    // UTF-8-boundary cut before appending the notice (same reason as bash).
-    aoi::utf8SafeTruncate(out, maxBytes);
-    out += "\n...(truncated)";
+  // Nothing is discarded: if more remains, say exactly where to continue.
+  if (offset + readBytes < total) {
+    const size_t complete = aoi::utf8CompleteLength(out);
+    out.resize(complete);
+    out += "\n...(total " + std::to_string(total) + " bytes; continue with offset=" +
+           std::to_string(offset + complete) + ")";
   }
   return out;
+}
+
+// Save the FULL tool output into the workspace out\ dir so nothing is lost
+// when only a size-capped head is returned to the model. Returns the
+// workspace-relative path, or "" on failure.
+std::string saveFullOutput(const std::string& op, const std::string& content) {
+  std::error_code ec;
+  fs::create_directories("out", ec);
+  const std::string name =
+      "out\\" + op + "_" + std::to_string(GetTickCount64()) + ".txt";
+  std::ofstream f(name, std::ios::binary | std::ios::trunc);
+  if (!f.is_open()) return "";
+  f.write(content.data(), static_cast<std::streamsize>(content.size()));
+  f.close();
+  return name;
 }
 
 // ---- bash ----
@@ -306,26 +327,48 @@ std::string runBash(const std::string& cmd) {
   }
   CloseHandle(hWrite);
 
+  // Stream the child's output: the first 30KB stay in memory as the reply
+  // head; anything beyond that is streamed to out\bash_<ts>.txt (head first,
+  // then the tail) so NOTHING is lost and the process is never killed for
+  // producing a lot of output.
+  constexpr size_t kHead = 30000;
   std::string out;
+  std::string spillPath;
+  std::ofstream spill;
+  size_t totalBytes = 0;
   char buf[4096];
   DWORD n = 0;
   while (ReadFile(hRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
-    out.append(buf, n);
-    if (out.size() > 30000) {
-      TerminateProcess(pi.hProcess, 1);
-      break;
+    size_t off = 0;
+    if (out.size() < kHead) {
+      const size_t take = (std::min)(kHead - out.size(), static_cast<size_t>(n));
+      out.append(buf, take);
+      off = take;
     }
+    if (off < static_cast<size_t>(n)) {
+      if (!spill.is_open()) {
+        std::error_code ec;
+        fs::create_directories("out", ec);
+        spillPath = "out\\bash_" + std::to_string(GetTickCount64()) + ".txt";
+        spill.open(spillPath, std::ios::binary | std::ios::trunc);
+        if (spill.is_open())
+          spill.write(out.data(), static_cast<std::streamsize>(out.size()));
+      }
+      if (spill.is_open())
+        spill.write(buf + off, static_cast<std::streamsize>(n - off));
+    }
+    totalBytes += n;
   }
+  if (spill.is_open()) spill.close();
   CloseHandle(hRead);
   WaitForSingleObject(pi.hProcess, 5000);
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
   if (out.empty()) out = "(no output)";
-  if (out.size() > 30000) {
-    // UTF-8-boundary cut: a mid-sequence split would break JSON dumps of the
-    // conversation history later (nlohmann type_error.316).
-    aoi::utf8SafeTruncate(out, 30000);
-    out += "\n...(truncated)";
+  if (!spillPath.empty() && totalBytes > kHead) {
+    aoi::utf8SafeTruncate(out, kHead);
+    out += "\n...(truncated: full output " + std::to_string(totalBytes) +
+           " bytes saved to " + spillPath + "; use read with offset to page through)";
   }
   return out;
 }
@@ -401,8 +444,14 @@ std::string runSqlQuery(const std::string& path, const std::string& sql) {
   std::string text = out.dump();
   constexpr size_t kMax = 30000;
   if (text.size() > kMax) {
+    const size_t fullSize = text.size();
+    const std::string saved = saveFullOutput("sql", text);
     aoi::utf8SafeTruncate(text, kMax);
-    text += "\n...(truncated)";
+    if (!saved.empty())
+      text += "\n...(truncated: full output " + std::to_string(fullSize) +
+              " bytes saved to " + saved + "; use read with offset to page through)";
+    else
+      text += "\n...(truncated)";
   }
   return text;
 }
@@ -504,7 +553,9 @@ int main(int argc, char** argv) {
       output = runBash(req.value("command", ""));
     } else if (op == "read") {
       const std::string path = req.value("path", "");
-      output = readTextFile(path);
+      const size_t offset = static_cast<size_t>(req.value("offset", 0));
+      const size_t maxB = static_cast<size_t>(req.value("max_bytes", 60000));
+      output = readTextFile(path, offset, maxB);
       // Shipped knowledge files (e.g. docs/...) live next to the AGENT exe,
       // outside the sandbox workspace. When the relative path does not exist
       // in the workspace, resolve it against the exe dir (read-only fallback;
@@ -512,7 +563,7 @@ int main(int argc, char** argv) {
       // relative paths - a ".." path could escape the exe dir.
       if (output.rfind("(file not found", 0) == 0 && !g_exeDir.empty() &&
           isSafeRelativePath(path)) {
-        const std::string alt = readTextFile(g_exeDir + "\\" + path);
+        const std::string alt = readTextFile(g_exeDir + "\\" + path, offset, maxB);
         if (alt.rfind("(file not found", 0) != 0) output = alt;
       }
     } else if (op == "write") {

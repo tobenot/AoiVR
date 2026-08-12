@@ -36,17 +36,30 @@ ToolDefinition makeReadTool() {
   ToolDefinition t;
   t.name = "read";
   t.label = "read";
-  t.description = "Read a file from disk and return its contents. Use for inspecting files, configs, or source code. Always provide the required 'path' parameter.";
+  t.description =
+      "Read a file from disk and return its contents. Use for inspecting files, configs, or source code. "
+      "Large files are paged: pass 'offset' (bytes) to continue where a previous read stopped - the result "
+      "tells you the next offset. Tool outputs from bash/sql_query/fetch that exceed their size cap are "
+      "saved in full to sandbox\\out\\ - read those files with offset to see everything.";
   t.parameters = {
       {"type", "object"},
-      {"properties", nlohmann::json{{"path", {{"type", "string"}, {"description", "Absolute or relative file path"}}}}},
+      {"properties",
+       nlohmann::json{
+           {"path", {{"type", "string"}, {"description", "Absolute or relative file path"}}},
+           {"offset", {{"type", "integer"},
+                       {"description", "Byte offset to start reading from (default 0)"}}},
+           {"max_bytes", {{"type", "integer"},
+                          {"description", "Max bytes to return per call (default 60000)"}}}}},
       {"required", nlohmann::json::array({"path"})},
   };
   t.execute = [](const std::string&, const nlohmann::json& args) -> nlohmann::json {
     const std::string path = args.value("path", "");
     if (path.empty())
       return nlohmann::json{{"content", "(read: missing required parameter 'path' - call the tool again with the file path you want to read)"}};
-    return sandboxToolResult(nlohmann::json{{"op", "read"}, {"path", path}}.dump());
+    auto op = nlohmann::json{{"op", "read"}, {"path", path}};
+    if (args.contains("offset")) op["offset"] = args.value("offset", 0);
+    if (args.contains("max_bytes")) op["max_bytes"] = args.value("max_bytes", 60000);
+    return sandboxToolResult(op.dump());
   };
   return t;
 }
@@ -60,7 +73,9 @@ ToolDefinition makeBashTool() {
       "Tips: get the current time with `date /t` (always available). "
       "NEVER use curl/wget/Invoke-WebRequest/Invoke-RestMethod for network requests: the sandbox cannot do TLS "
       "(curl exits with error 35), so those always fail. Use the `fetch` tool instead - it supports custom headers, "
-      "cookies, GET/POST and works reliably.";
+      "cookies, GET/POST and works reliably. "
+      "Command output over 30KB is saved in full to the sandbox workspace out\\ directory (path is returned); "
+      "page through it with the read tool's offset parameter.";
   t.parameters = {
       {"type", "object"},
       {"properties", nlohmann::json{{"command", {{"type", "string"}, {"description", "The command to run"}}}}},

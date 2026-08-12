@@ -1,9 +1,14 @@
 #include "fetch_tools.hpp"
 
+#include <windows.h>
+
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <map>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "agent_utils.hpp"
@@ -12,6 +17,34 @@
 namespace aoi {
 
 namespace {
+
+std::string agentExeDir() {
+  char buf[MAX_PATH]{};
+  if (GetModuleFileNameA(nullptr, buf, MAX_PATH) > 0) {
+    std::string dir(buf);
+    const size_t slash = dir.find_last_of("\\/");
+    if (slash != std::string::npos) return dir.substr(0, slash + 1);
+  }
+  return "";
+}
+
+// Save the FULL response body into the sandbox workspace out\ dir so nothing
+// is lost when only a size-capped head is returned. Returns the
+// workspace-relative path ("out\fetch_..._.txt"), or "" on failure.
+std::string saveFullBody(const std::string& body) {
+  const std::string exe = agentExeDir();
+  if (exe.empty()) return "";
+  const std::string dir = exe + "sandbox\\out";
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  const std::string rel =
+      "out\\fetch_" + std::to_string(GetTickCount64()) + ".txt";
+  std::ofstream f(dir + "\\" + rel.substr(4), std::ios::binary | std::ios::trunc);
+  if (!f.is_open()) return "";
+  f.write(body.data(), static_cast<std::streamsize>(body.size()));
+  f.close();
+  return rel;
+}
 
 // Parse+validate the curl -H style header array: every entry must be a string
 // containing a colon. Returns false with a message on the first bad entry.
@@ -60,7 +93,10 @@ ToolDefinition makeFetchTool() {
       "environment CANNOT do TLS (curl exits with error 35), so fetch is the "
       "only reliable way to reach the internet. Pass custom cookies as a header "
       "line, e.g. [\"Cookie: session=abc123\"]. Returns HTTP status, response "
-      "headers (e.g. Set-Cookie) and the body.";
+      "headers (e.g. Set-Cookie) and the body. Responses longer than max_bytes "
+      "are NOT lost: the full body is saved to a file under the sandbox "
+      "workspace out\\ directory and the head is returned with its path - use "
+      "the read tool with offset to page through the rest.";
   t.parameters = {
       {"type", "object"},
       {"properties",
@@ -159,11 +195,18 @@ ToolDefinition makeFetchTool() {
       }
       std::string b = res.body;
       if (b.size() > maxBytes) {
-        // Truncate on a UTF-8 character boundary: a mid-sequence cut leaves
-        // invalid UTF-8 in the conversation history, and the next prompt's
-        // JSON serialization throws (type_error.316) - "SDK prompt error".
+        // Nothing is discarded: the full body goes to sandbox\out\ and the
+        // head is returned with the path. Cut on a UTF-8 boundary so the
+        // stored head stays valid for JSON serialization downstream.
+        const size_t fullSize = b.size();
+        const std::string saved = saveFullBody(b);
         utf8SafeTruncate(b, maxBytes);
-        b += "\n...(truncated: response exceeds " + std::to_string(maxBytes) + " bytes)";
+        if (!saved.empty())
+          b += "\n...(truncated: full response " + std::to_string(fullSize) +
+               " bytes saved to " + saved +
+               " (sandbox workspace); use read with offset to page through)";
+        else
+          b += "\n...(truncated: response exceeds " + std::to_string(maxBytes) + " bytes)";
       }
       if (b.empty()) b = "(fetch: empty response)";
       out["content"] = b;

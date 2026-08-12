@@ -61,7 +61,9 @@ ToolDefinition makeSqlQueryTool(const std::string& configuredDbPath) {
       "Default database (omit db_path): the VRCX companion app's VRChat session store at "
       "%APPDATA%\\VRCX\\VRCX.sqlite3 - its `cookies` table contains the logged-in VRChat auth "
       "session as a base64-encoded JSON list of cookies (see the convert tool to decode it). "
-      "Other tables can be discovered with `SELECT name FROM sqlite_master WHERE type='table'`.";
+      "Other tables can be discovered with `SELECT name FROM sqlite_master WHERE type='table'`. "
+      "Results over 30KB are saved in full to the sandbox workspace out\\ directory (path is "
+      "returned); page through them with the read tool's offset parameter.";
   t.parameters = {
       {"type", "object"},
       {"properties",

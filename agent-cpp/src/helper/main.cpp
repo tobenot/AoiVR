@@ -485,7 +485,8 @@ json resolvePath(const json& root, const std::string& path) {
 }
 
 std::string runConvert(const std::string& fn, const std::string& value,
-                       const std::string& path) {
+                       const std::string& path, const std::string& filter,
+                       bool count) {
   try {
     if (fn == "base64_decode") {
       std::string out;
@@ -501,6 +502,47 @@ std::string runConvert(const std::string& fn, const std::string& value,
       json root = json::parse(value, nullptr, false);
       if (root.is_discarded()) return "(convert: invalid JSON document)";
       json v = path.empty() ? root : resolvePath(root, path);
+      if (v.is_string()) return v.get<std::string>();
+      if (v.is_null()) return "null";
+      return v.dump();
+    }
+    if (fn == "json_query_file") {
+      // Read a JSON document from a workspace file and query/filter/count it.
+      // This is the sandbox-safe way to process large API dumps saved by
+      // fetch/bash/sql_query (PowerShell/python are NOT available under the
+      // sandbox user - USER32-dependent processes fail to start).
+      std::ifstream f(value, std::ios::binary);
+      if (!f.is_open()) return "(convert: file not found: " + value + ")";
+      std::string doc((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+      json root = json::parse(doc, nullptr, false);
+      if (root.is_discarded())
+        return "(convert: invalid JSON document: " + value + ")";
+      json v = path.empty() ? root : resolvePath(root, path);
+      // Optional filter on an array: "key==value" or "key!=value" (string
+      // compare against each element's field; non-string values compare by
+      // their JSON dump).
+      if (!filter.empty() && v.is_array()) {
+        const size_t eq = filter.find("==");
+        const size_t ne = filter.find("!=");
+        const bool isNe = ne != std::string::npos;
+        const size_t sep = isNe ? ne : eq;
+        if (sep != std::string::npos) {
+          const std::string key = filter.substr(0, sep);
+          const std::string want = filter.substr(sep + 2);
+          json filtered = json::array();
+          for (const auto& e : v) {
+            if (!e.is_object() || !e.contains(key)) continue;
+            const auto& ev = e[key];
+            const std::string evs =
+                ev.is_string() ? ev.get<std::string>() : ev.dump();
+            const bool match = evs == want;
+            if (isNe ? !match : match) filtered.push_back(e);
+          }
+          v = filtered;
+        }
+      }
+      if (count) return std::to_string(v.is_array() ? v.size() : 1);
       if (v.is_string()) return v.get<std::string>();
       if (v.is_null()) return "null";
       return v.dump();
@@ -629,7 +671,8 @@ int main(int argc, char** argv) {
       output = runSqlQuery(req.value("db_path", ""), req.value("sql", ""));
     } else if (op == "convert") {
       output = runConvert(req.value("fn", ""), req.value("value", ""),
-                          req.value("path", ""));
+                          req.value("path", ""), req.value("filter", ""),
+                          req.value("count", false));
     } else {
       error = "(sandbox helper: unknown op '" + op + "')";
     }

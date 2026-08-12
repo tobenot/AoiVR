@@ -1,4 +1,4 @@
-// Skills unit test: SKILL.md discovery, frontmatter parsing (Codex parser
+﻿// Skills unit test: SKILL.md discovery, frontmatter parsing (Codex parser
 // semantics), name validation, enablement rules, and budgeted rendering
 // (Codex render semantics). Standalone (no hardware, no network).
 #include <cstdio>
@@ -131,10 +131,10 @@ int main() {
   std::puts("-------------------------------");
   check(catalog.find("## Skills") != std::string::npos, "## Skills header");
   check(catalog.find("### Available skills") != std::string::npos, "### Available skills header");
-  check(catalog.find("- git-release: Create consistent releases (file: git-release/SKILL.md)") !=
+  check(catalog.find("- git-release: Create consistent releases (file: skills/git-release/SKILL.md)") !=
             std::string::npos,
         "entry line format: name: description (file: relPath)");
-  check(catalog.find("user-helper: helper (file: user-helper/SKILL.md)") !=
+  check(catalog.find("user-helper: helper (file: skills_user/user-helper/SKILL.md)") !=
             std::string::npos,
         "user skill listed with short-description preference");
   check(catalog.find("progressive disclosure") != std::string::npos,

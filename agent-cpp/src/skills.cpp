@@ -341,10 +341,16 @@ std::string renderAvailableSkills(const std::vector<SkillDef>& skills,
       "instructions across turns unless re-mentioned.";
 
   // - name: description (file: relPath)
+  // relPath is relative to the skill ROOT (sandbox\skills or sandbox\skills_user);
+  // the model's working directory is the sandbox workspace, so the catalog
+  // must carry the root folder name as a prefix ("skills/..." / "skills_user/...")
+  // or the model reads a path that doesn't exist (observed: it tried
+  // "vrchat-assistant/SKILL.md" and failed).
   const auto renderLine = [](const SkillDef& s, const std::string& desc) {
     std::string line = "- " + s.name;
     if (!desc.empty()) line += ": " + desc;
-    line += " (file: " + s.relPath + ")";
+    const std::string root = s.scope == SkillScope::System ? "skills/" : "skills_user/";
+    line += " (file: " + root + s.relPath + ")";
     return line;
   };
 

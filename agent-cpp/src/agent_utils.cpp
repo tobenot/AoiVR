@@ -41,6 +41,41 @@ size_t utf8CompleteLength(const std::string& s) {
   return charStart;
 }
 
+std::string sanitizeUtf8(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  const char kReplacement[] = "\xEF\xBF\xBD";  // U+FFFD in UTF-8
+  for (size_t i = 0; i < s.size();) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c < 0x80) {
+      out += s[i];
+      i += 1;
+      continue;
+    }
+    size_t need = 1;
+    if (c >= 0xF0) need = 4;
+    else if (c >= 0xE0) need = 3;
+    else if (c >= 0xC0) need = 2;
+    bool valid = i + need <= s.size();
+    if (valid) {
+      for (size_t k = 1; k < need; ++k) {
+        if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) {
+          valid = false;
+          break;
+        }
+      }
+    }
+    if (valid) {
+      out.append(s, i, need);
+      i += need;
+    } else {
+      out += kReplacement;  // one replacement per bad byte
+      i += 1;
+    }
+  }
+  return out;
+}
+
 std::string buildContextPrefix(const std::vector<std::string>& history) {
 
   if (history.empty()) return "";

@@ -95,6 +95,60 @@ int main(int argc, char** argv) {
     (void)dumped;
   }
 
+  // utf8CompleteLength: mid-char cuts must back off to a WHOLE character.
+  {
+    std::string s = "ab";
+    s += "\xE4\xB8\xAD";  // 中 (3 bytes)
+    s += "cd";
+    // complete length of whole string = 7
+    if (aoi::utf8CompleteLength(s) != 7) {
+      std::printf("FAIL: utf8CompleteLength full\n");
+      ++failures;
+    } else {
+      std::puts("ok: utf8CompleteLength full");
+    }
+    // cut inside 中 (4 bytes: a b E4 B8): the char does NOT fit -> drop it
+    if (aoi::utf8CompleteLength(s.substr(0, 4)) != 2) {
+      std::printf("FAIL: utf8CompleteLength mid-char drops char\n");
+      ++failures;
+    } else {
+      std::puts("ok: utf8CompleteLength mid-char drops char");
+    }
+    // cut right after 中 (5 bytes): char fits -> include it
+    if (aoi::utf8CompleteLength(s.substr(0, 5)) != 5) {
+      std::printf("FAIL: utf8CompleteLength keeps whole char\n");
+      ++failures;
+    } else {
+      std::puts("ok: utf8CompleteLength keeps whole char");
+    }
+    // the fixed prefix must be valid UTF-8 for JSON dump
+    std::string fixed = s.substr(0, 4);
+    fixed.resize(aoi::utf8CompleteLength(fixed));
+    (void)nlohmann::json(fixed).dump();
+  }
+
+  // sanitizeUtf8: bad bytes become U+FFFD, valid text passes through.
+  {
+    std::string bad = "a\xE4\xB8";  // dangling lead
+    bad += "\xFF";                  // invalid byte
+    const std::string clean = aoi::sanitizeUtf8(bad);
+    if (clean != std::string("a") + "\xEF\xBF\xBD" + "\xEF\xBF\xBD") {
+      std::printf("FAIL: sanitizeUtf8 -> %zu bytes\n", clean.size());
+      ++failures;
+    } else {
+      std::puts("ok: sanitizeUtf8 replaces bad bytes");
+    }
+    std::string good = "ab";
+    good += "\xE4\xB8\xAD";
+    if (aoi::sanitizeUtf8(good) != good) {
+      std::printf("FAIL: sanitizeUtf8 keeps valid\n");
+      ++failures;
+    } else {
+      std::puts("ok: sanitizeUtf8 keeps valid");
+    }
+    (void)nlohmann::json(aoi::sanitizeUtf8(bad)).dump();  // must not throw
+  }
+
   std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
   if (failures) return 1;
 

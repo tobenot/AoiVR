@@ -728,10 +728,10 @@ int main(int argc, char** argv) {
   json reply = json::object();
   if (error.empty()) {
     reply["ok"] = true;
-    reply["output"] = output;
+    reply["output"] = aoi::sanitizeUtf8(output);
   } else {
     reply["ok"] = false;
-    reply["error"] = error;
+    reply["error"] = aoi::sanitizeUtf8(error);
   }
   // Serialize defensively: a malformed payload (e.g. dangling UTF-8 that
   // slipped past sanitizers) must surface as an error reply, NOT escape the

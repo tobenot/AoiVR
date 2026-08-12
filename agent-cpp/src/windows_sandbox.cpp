@@ -856,18 +856,20 @@ std::string sandboxExecuteInner(const std::string& opJson) {
     if (out.size() > 65536) break;
   }
 
+  // Read the exit code BEFORE closing the process handle (reading it after
+  // CloseHandle(pi.hProcess) returns garbage - observed as a fake "exit=0"
+  // that masked a real 0xC0000409 crash).
+  DWORD helperExit = 0;
+  GetExitCodeProcess(pi.hProcess, &helperExit);
+
   CloseHandle(outRead);
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
   if (job) CloseHandle(job);
 
   if (out.empty()) {
-    // Diagnose silent helper exits (crash / missing output) with the exit
-    // code so the failure is visible instead of a bare "no output".
-    DWORD code = 0;
-    GetExitCodeProcess(pi.hProcess, &code);
     return R"json({"ok":false,"error":"(sandbox: helper produced no output")json" +
-           std::string(", exit=") + std::to_string(code) + ")}";
+           std::string(", exit=") + std::to_string(helperExit) + ")}";
   }
   return out;
 }

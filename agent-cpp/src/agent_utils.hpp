@@ -31,4 +31,9 @@ void utf8SafeTruncate(std::string& s, size_t maxBytes);
 // page never ends mid-character.
 size_t utf8CompleteLength(const std::string& s);
 
+// Replace invalid UTF-8 bytes with U+FFFD so JSON serialization never throws
+// (nlohmann's dump validates strings - invalid input aborts callers that
+// forgot to catch). Keeps valid characters intact.
+std::string sanitizeUtf8(const std::string& s);
+
 } // namespace aoi

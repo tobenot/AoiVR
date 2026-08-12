@@ -385,18 +385,50 @@ std::string runBash(const std::string& cmd) {
   return out;
 }
 
-// ---- sql_query (read-only) ----
+// ---- sql_query (read-only, path-whitelisted) ----
 std::string trimLeft(const std::string& s) {
   const size_t pos = s.find_first_not_of(" \t\r\n");
   return pos == std::string::npos ? std::string() : s.substr(pos);
 }
 
-std::string runSqlQuery(const std::string& path, const std::string& sql) {
+// Normalize a path for comparison: lowercase, forward slashes, strip trailing
+// separators/dots - so "C:\...\VRCX.sqlite3" matches "c:/.../vr cx..." forms.
+std::string normPathForCompare(const std::string& p) {
+  std::string n = p;
+  for (auto& c : n) {
+    if (c == '\\') c = '/';
+    else if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  }
+  while (n.size() > 1 && (n.back() == '/' || n.back() == '.')) n.pop_back();
+  return n;
+}
+
+std::string runSqlQuery(const std::string& path, const std::string& sql,
+                        const std::string& allowedDb) {
   const std::string sqlT = trimLeft(sql);
-  const bool select = sqlT.rfind("SELECT", 0) == 0 || sqlT.rfind("select", 0) == 0;
-  const bool pragma = sqlT.rfind("PRAGMA", 0) == 0 || sqlT.rfind("pragma", 0) == 0;
+  auto kwEndOk = [&sqlT](const char* kw, size_t len) {
+    if (sqlT.rfind(kw, 0) != 0) return false;
+    if (sqlT.size() == len) return true;
+    const unsigned char c = static_cast<unsigned char>(sqlT[len]);
+    return isspace(c) != 0 || c == '"' || c == '\'' || c == '(';
+  };
+  const bool select = kwEndOk("SELECT", 6) || kwEndOk("select", 6) ||
+                      kwEndOk("WITH", 4) || kwEndOk("with", 4);
+  const bool pragma = kwEndOk("PRAGMA", 6) || kwEndOk("pragma", 6);
   if (!select && !pragma)
-    return "(sql_query rejected: only SELECT/PRAGMA statements are allowed)";
+    return "(sql_query rejected: only SELECT/WITH/PRAGMA statements are allowed)";
+  // ATTACH could open another database even under SQLITE_OPEN_READONLY.
+  if (sqlT.find("ATTACH") != std::string::npos ||
+      sqlT.find("attach") != std::string::npos)
+    return "(sql_query rejected: ATTACH is not allowed)";
+
+  // Defense in depth: only the whitelisted database path may be queried (the
+  // sandbox user is world-readable, so an unrestricted path would expose any
+  // .sqlite on disk - e.g. other apps' credentials).
+  if (!allowedDb.empty()) {
+    if (normPathForCompare(path) != normPathForCompare(allowedDb))
+      return "(sql_query rejected: db_path is not the allowed VRCX database)";
+  }
 
   sqlite3* db = nullptr;
   if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
@@ -680,7 +712,8 @@ int main(int argc, char** argv) {
       }
       }
     } else if (op == "sql_query") {
-      output = runSqlQuery(req.value("db_path", ""), req.value("sql", ""));
+      output = runSqlQuery(req.value("db_path", ""), req.value("sql", ""),
+                           req.value("allowed_db", ""));
     } else if (op == "convert") {
       output = runConvert(req.value("fn", ""), req.value("value", ""),
                           req.value("path", ""), req.value("filter", ""),

@@ -83,18 +83,6 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     cfg.tts.voice = get(tts, "voice", cfg.tts.voice);
   }
   cfg.vrcxDbPath = get(root, "vrcxDbPath", "");
-  // sandbox.read_dirs: directories granted read+execute to the sandbox user
-  // at startup. Relative entries are resolved against the exe dir by the
-  // sandbox layer.
-  if (root.is_object() && root.contains("sandbox") && root["sandbox"].is_object()) {
-    const auto& sb = root["sandbox"];
-    if (sb.contains("read_dirs") && sb["read_dirs"].is_array()) {
-      for (const auto& d : sb["read_dirs"]) {
-        if (d.is_string() && !d.get<std::string>().empty())
-          cfg.sandboxReadDirs.push_back(d.get<std::string>());
-      }
-    }
-  }
   if (root.is_object() && root.contains("hooks") && root["hooks"].is_object()) {
     const auto& h = root["hooks"];
     if (h.contains("enabled")) {

@@ -227,10 +227,6 @@ bool AoiAgent::start() {
   // writable inside the sandbox).
   ensureSkillDirs(agentExeDir() + "sandbox\\skills",
                   agentExeDir() + "sandbox\\skills_user");
-  // Register sandbox read dirs from aoi_config.json ("sandbox.read_dirs");
-  // granted to the sandbox user on the next sandbox call (shipped knowledge
-  // files outside the sandbox workspace become readable by the model).
-  setSandboxReadDirs(fileConfig_.sandboxReadDirs);
   const ToolRegistry registry =
       loadRegistries(workDir_ + "\\system_registry.json",
                      agentExeDir() + "sandbox\\user_registry.json");

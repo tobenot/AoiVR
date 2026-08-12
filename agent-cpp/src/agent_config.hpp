@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <string>
 #include <vector>
 
@@ -50,7 +50,6 @@ struct AgentFileConfig {
   // per launch so the model can read shipped knowledge files that live outside
   // the sandbox workspace. Never include aoi_config.json's directory itself:
   // it holds API keys.
-  std::vector<std::string> sandboxReadDirs;
 };
 
 // Load aoi_config.json from `workDir`. Missing file / unparsable JSON / missing

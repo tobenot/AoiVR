@@ -1,4 +1,4 @@
-#include "windows_sandbox.hpp"
+﻿#include "windows_sandbox.hpp"
 
 #include <windows.h>
 
@@ -64,7 +64,6 @@ std::mutex g_sandboxMutex;
 // Directories granted read+execute to the sandbox user at startup (registered
 // from aoi_config.json "sandbox.read_dirs"). Guarded by g_sandboxMutex (set
 // once at agent start, read in ensureSandboxReady).
-std::vector<std::string> g_sandboxReadDirs;
 
 // ---- base64 decode (for the DPAPI blob in the secrets file) ----
 bool b64Decode(const std::string& in, std::string* out) { return Base64::Decode(in, out); }
@@ -535,31 +534,6 @@ void ensureSandboxReady() {
                               FILE_GENERIC_EXECUTE | DELETE,
                           reinterpret_cast<PSID>(userSid.data())))
         std::fprintf(stderr, "[Sandbox] WARNING: applyAceToPath(workspace user allow) failed, err=%lu\n", GetLastError());
-      // Registered read dirs (aoi_config.json "sandbox.read_dirs"): grant the
-      // sandbox user READ+EXECUTE (inherited) so shipped knowledge files
-      // outside the sandbox workspace are readable by the model. Relative
-      // entries resolve against the agent exe dir. Applied once per launch
-      // (idempotent ACE).
-      for (const auto& rd : g_sandboxReadDirs) {
-        std::string dir = rd;
-        if (dir == "." || dir.rfind(".\\", 0) == 0 || dir.rfind("./", 0) == 0) {
-          dir = workdir + dir.substr(1);  // "<exeDir>" + rest
-        } else if (dir.find(':') == std::string::npos &&
-                   dir.find("\\\\") != 0) {
-          dir = workdir + dir;  // relative -> exeDir
-        }
-        if (GetFileAttributesA(dir.c_str()) == INVALID_FILE_ATTRIBUTES) {
-          std::fprintf(stderr,
-                       "[Sandbox] WARNING: read_dirs entry not found, skipped: %s\n",
-                       dir.c_str());
-          continue;
-        }
-        if (!applyAceToPath(dir, SET_ACCESS,
-                            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
-                            reinterpret_cast<PSID>(userSid.data())))
-          std::fprintf(stderr, "[Sandbox] WARNING: read_dirs grant failed: %s err=%lu\n",
-                       dir.c_str(), GetLastError());
-      }
       // Workdir write protection: the sandbox user inherits Authenticated
       // Users / Users modify rights on the agent directory (common on D:
       // drives), which would let the model write anywhere next to the agent
@@ -677,11 +651,7 @@ bool createRestrictedToken(HANDLE* outToken) {
 
 } // namespace
 
-// Registered in the DIRECT aoi scope (declared in windows_sandbox.hpp).
-void setSandboxReadDirs(const std::vector<std::string>& dirs) {
-  std::lock_guard<std::mutex> lk(g_sandboxMutex);
-  g_sandboxReadDirs = dirs;
-}
+
 
 // Wide-char variants used by the CreateProcessWithLogonW path: the ANSI
 // module path is GBK on CJK systems and must never be byte-widened.

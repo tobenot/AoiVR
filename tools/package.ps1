@@ -88,19 +88,11 @@ Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.md") $OutDir
 # Verbatim official license texts (referenced by the NOTICES index).
 Copy-Item (Join-Path $root "licenses") (Join-Path $OutDir "licenses") -Recurse -Force
 
-# VRChat integration skill docs (agent runtime loads these via the read tool;
-# the build normally carries them too, but copy from source so the package is
-# complete even if the Unity build step was skipped).
-$skillSrc = Join-Path $root "docs\vrchat-assistant"
-$skillDst = Join-Path $OutDir "docs\vrchat-assistant"
-if (Test-Path $skillSrc) {
-  if (Test-Path $skillDst) { Remove-Item $skillDst -Recurse -Force }
-  Copy-Item $skillSrc $skillDst -Recurse -Force
-}
-
-# ALSO install the skill into sandbox\skills: the agent's system-prompt skill
-# catalog (loadSkills) scans that directory at runtime. Without it the model
-# never learns the skill exists and fumbles around public docs instead.
+# VRChat integration skill: single source at agent-cpp/skills/vrchat-assistant,
+# installed ONLY into sandbox\skills (the runtime skill-catalog directory the
+# agent scans). docs/ copies are gone - the model reads skills/<name>/SKILL.md
+# relative to the sandbox workspace.
+$skillSrc = Join-Path $root "agent-cpp\skills\vrchat-assistant"
 $skillSandboxDst = Join-Path $OutDir "sandbox\skills\vrchat-assistant"
 if (Test-Path $skillSrc) {
   if (Test-Path $skillSandboxDst) { Remove-Item $skillSandboxDst -Recurse -Force }

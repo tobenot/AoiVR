@@ -20,6 +20,18 @@ description: VRChat 集成操作技能。当用户提到 VRChat / VRCX / 世界 
 
 只有**历史/累积数据**（游戏日志、好友动态 Feed 时间线、活动热力图、备注、访问历史）才用 VRCX 本地数据库。
 
+## ⚠️ 铁律：列表统计/过滤必须程序化（违反 = 报错数）
+
+**绝对禁止目测估算 API 返回的大列表**（说"大约""大概"就是错）。拿到完整响应后（超限自动保存在 `out\` 目录），用 **PowerShell**（沙箱内可用，已验证）精确计算：
+
+```bash
+powershell -NoProfile -Command "$d = Get-Content -Raw -Encoding UTF8 out\fetch_xxx.txt | ConvertFrom-Json; $total = $d.Count; $online = ($d | Where-Object { $l = $_.location; $l -and $l -ne 'offline' -and $l -ne 'private' -and $l -ne 'traveling' }).Count; Write-Output \"total=$total online=$online\""
+```
+
+- 统计好友/世界/通知数量、按字段过滤、取 top N——一律走这种方式，**数字必须来自计算结果，不允许来自阅读印象**。
+- **不要用 `findstr | find /c` 统计 JSON**：API 返回的是单行压缩 JSON，find 数的是"行数"（永远是 1），不是出现次数。
+- `convert` 的 `json_query` 适合小文档提取字段；大文件（几十 KB+）优先 PowerShell（直接读文件，不用把内容塞进工具参数）。
+
 ## 能力边界
 
 能做的事：
@@ -158,6 +170,7 @@ start "" "vrchat://launch?id=wrld_xxx:12345~region(us)&shortName=abc12345"
 ### D. 好友 / 通知 / 用户信息
 
 - 好友列表：`GET /auth/user/friends?n=100`（**在线判定**：`location` 非空且不是 `"offline"`/`"private"`/`"traveling"` 才是真的在线——Web 端登录的朋友 `location` 可能为空，误判会把不在线的也算进去）
+- **报数字前必须程序化统计**（见顶部"列表统计必须程序化"铁律）：响应超限会自动存到 `out\fetch_xxx.txt`，用 PowerShell `ConvertFrom-Json` 读文件精确计数/过滤，**不要**目测、不要说"大约"。
 - 通知：`GET /auth/user/notifications?n=50`
 - 用户详情：`GET /users/{userId}`（含状态、当前世界、当前头像、信任等级）
 - 好友位置变化历史/最近活动：本地库 Feed 表（见 `references/vrcx-database.md`）

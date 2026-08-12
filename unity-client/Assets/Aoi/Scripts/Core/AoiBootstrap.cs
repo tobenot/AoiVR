@@ -511,12 +511,12 @@ public class AoiBootstrap : MonoBehaviour
             TextAlignmentOptions.MidlineLeft, Color.yellow, false);
         procText.font = AoiOrchestrator.ResolveMonoFont();
         procText.characterSpacing = 10f;
-        // Mask + no-wrap: the procbar always shows exactly one line. The text
-        // is sentence-anchored (HandPanelUI.TrimThoughtToFit) so the visible
-        // start is a complete sentence, never half of one.
-        procText.overflowMode = TextOverflowModes.Masking;
-        procText.enableWordWrapping = false;  // single line, sentence-anchored tail
-        procbar.AddComponent<RectMask2D>();
+        // Data-driven window: the text content assigned to this component IS
+        // the visible window (HandPanelUI keeps only the newest lines that
+        // fit, auto-scrolling to the bottom). Wrapping on for long lines; no
+        // RectMask2D - nothing overflows because the data itself is windowed.
+        procText.overflowMode = TextOverflowModes.Overflow;
+        procText.enableWordWrapping = true;
         var ptRT = procText.GetComponent<RectTransform>();
         ptRT.anchorMin = Vector2.zero;
         ptRT.anchorMax = Vector2.one;

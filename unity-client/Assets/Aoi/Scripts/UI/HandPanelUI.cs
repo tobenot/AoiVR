@@ -259,13 +259,6 @@ public class HandPanelUI : MonoBehaviour
     // Pipeline is ephemeral: shown while the agent is working, then fades out.
     private float procFadeStart = -1f;
     private const float procFadeDuration = 0.5f;
-    // Whether this turn has used a tool ("检索" stage). Kept for the meta
-    // display (procbar only; the in-statusbar pstep dots were removed).
-    private bool procSawRetrieve_ = false;
-    // One line, NO marquee: when the thought stream outgrows the panel we show
-    // its tail anchored at a complete sentence start (never half a sentence).
-    // Inner text width = max panel width (616) - 12px margins on both sides.
-    private const float procTextMaxWidth = 616f - 24f;
 
     public void SetProcessingStage(string stage, string thought = null)
     {
@@ -273,97 +266,63 @@ public class HandPanelUI : MonoBehaviour
         if (stage == "done")
         {
             procFadeStart = Time.unscaledTime;
-            procSawRetrieve_ = false;
             return;
         }
         ShowProcessing(true);
-        if (stage == "retrieve") procSawRetrieve_ = true;
 
-        // thought summary replaces in place (mockup: "▸ 他在问这家店还开不开…")
         string body = string.IsNullOrEmpty(thought)
             ? (stage switch { "understand" => "正在理解…", "retrieve" => "正在检索…", _ => "正在生成…" })
             : thought;
-        // Re-anchor on every update: the visible text starts at the newest
-        // complete sentence boundary, so the line never begins mid-sentence.
-        procbarText.text = TrimThoughtToFit("▸ " + body, procTextMaxWidth);
-        // Width: min 300 (default length), max fills the row (684 - 34*2 margins).
+        // Data-driven window: split into lines, then assign ONLY the newest
+        // lines that fit the panel (auto-scroll to bottom). No mask/clipping:
+        // the text component only ever holds visible data.
+        var lines = new System.Collections.Generic.List<string>(body.Split('\n'));
+        if (lines.Count == 0) lines.Add("");
+        lines[0] = "▸ " + lines[0];
+
+        const float maxW = 616f;   // panel width ceiling (684 - 34*2 margins)
+        const float minW = 300f;
+        const float maxH = 90f;    // ~4 rows of 12.5pt text
+        const float minH = 34f;
+        const float wPad = 24f;    // 12px margins each side
+        const float hPad = 14f;    // 7px top/bottom
+
+        string display = string.Join("\n", lines);
+        int start = 0;
+        Vector2 pref;
+        for (int iter = 0; iter <= lines.Count; iter++)
+        {
+            display = string.Join("\n", lines.GetRange(start, lines.Count - start));
+            // Measure wrapping at the max width: x = widest line, y = total
+            // wrapped height.
+            pref = procbarText.GetPreferredValues(display, maxW - wPad, 0f);
+            float panelW = Mathf.Clamp(pref.x + wPad, minW, maxW);
+            // Re-measure at the final width (narrower wrapping changes rows).
+            if (Mathf.Abs((panelW - wPad) - (maxW - wPad)) > 0.5f)
+                pref = procbarText.GetPreferredValues(display, panelW - wPad, 0f);
+            if (pref.y <= maxH - hPad) break;
+            start++;  // drop the oldest line, keep showing the newest
+        }
+        if (start > 0) display = string.Join("\n", lines.GetRange(start, lines.Count - start));
+        procbarText.text = display;
         procbarText.ForceMeshUpdate();
+
         var procbar = procbarText.transform.parent;
         var rt = procbar.GetComponent<RectTransform>();
         var img = procbar.GetComponent<UnityEngine.UI.Image>();
+        float w = Mathf.Clamp(procbarText.preferredWidth + wPad, minW, maxW);
+        float h = Mathf.Clamp(procbarText.preferredHeight + hPad, minH, maxH);
         var size = rt.sizeDelta;
-        float w = Mathf.Clamp(procbarText.preferredWidth + 24f, 300f, 616f);
-        if (Mathf.Abs(size.x - w) > 0.5f)
+        if (Mathf.Abs(size.x - w) > 0.5f || Mathf.Abs(size.y - h) > 0.5f)
         {
             size.x = w;
+            size.y = h;
             rt.sizeDelta = size;
             if (img != null)
-                img.sprite = AoiBootstrap.MakeCutPanel2Corners(w, 34, 8, 1,
+                img.sprite = AoiBootstrap.MakeCutPanel2Corners(w, h, 8, 1,
                     new Color(0.953f, 0.902f, 0f, 0.4f),
                     new Color(0.016f, 0.024f, 0.055f, 0.9f));
         }
-    }
-
-    // Fits the procbar text into maxW on one line without scrolling. If the
-    // text is too wide, the oldest sentences are dropped so the visible text
-    // always starts at a complete sentence boundary. If even a single
-    // sentence overflows, its complete start is kept and the tail is cut with
-    // "…" (start stays whole; only the end may be abbreviated).
-    string TrimThoughtToFit(string full, float maxW)
-    {
-        if (string.IsNullOrEmpty(full)) return full;
-        if (ProcTextWidth(full) <= maxW) return full;
-        int n = full.Length;
-        int lastBoundary = -1;
-        for (int i = 0; i < n - 1; i++)
-            if (IsSentenceEnd(full[i])) lastBoundary = i + 1;
-        if (lastBoundary <= 0)
-            return CutTail(full, maxW);  // no sentence boundary yet: keep the start
-        // Walk backwards from the newest boundary: keep the earliest boundary
-        // whose suffix still fits (longest complete-sentence tail that fits).
-        int best = lastBoundary;
-        for (int i = lastBoundary - 2; i >= 0; i--)
-        {
-            if (!IsSentenceEnd(full[i])) continue;
-            int cand = i + 1;
-            if (ProcTextWidth(full.Substring(cand)) > maxW) break;
-            best = cand;
-        }
-        string tail = full.Substring(best);
-        if (ProcTextWidth(tail) > maxW)
-            return CutTail(tail, maxW);
-        return tail;
-    }
-
-    // Sentence/clause endings: CJK + ASCII punctuation, so the visible start
-    // is a complete sentence (or clause), never the middle of one.
-    static bool IsSentenceEnd(char c)
-    {
-        return c == '。' || c == '！' || c == '？' || c == '；' || c == '：' ||
-               c == '，' || c == '、' ||
-               c == '.' || c == '!' || c == '?' || c == ';' || c == ':' ||
-               c == ',' || c == '\n';
-    }
-
-    float ProcTextWidth(string s)
-    {
-        return procbarText.GetPreferredValues(s).x;
-    }
-
-    // Cut the tail so the string fits maxW, appending "…" (the start stays
-    // complete; only the end is abbreviated).
-    string CutTail(string s, float maxW)
-    {
-        if (ProcTextWidth(s) <= maxW) return s;
-        const string ell = "…";
-        int lo = 0, hi = s.Length;
-        while (lo < hi)
-        {
-            int mid = (lo + hi + 1) / 2;
-            if (ProcTextWidth(s.Substring(0, mid) + ell) <= maxW) lo = mid;
-            else hi = mid - 1;
-        }
-        return s.Substring(0, lo) + ell;
     }
 
     public void ShowProcessing(bool show)
@@ -382,7 +341,6 @@ public class HandPanelUI : MonoBehaviour
     public void ResetProcessing()
     {
         procFadeStart = -1f;
-        procSawRetrieve_ = false;
         ShowProcessing(false);
     }
 

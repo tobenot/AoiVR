@@ -68,17 +68,18 @@ GET {providerUrl}?fileId={fileId}           -- 按图片文件 ID 反查（精�
 
 ### 第 2 步：第三方库反查（fileId → 头像）
 
-```bash
-curl -s --max-time 20 "https://api.avtrdb.com/v3/avatar/search/vrcx?fileId=<fileId>" \
-  -H "Referer: https://vrcx.app" -H "User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)"
+```
+fetch(url="https://api.avtrdb.com/v3/avatar/search/vrcx?fileId=<fileId>",
+      headers=["Referer: https://vrcx.app",
+               "User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)"])
 ```
 
 未命中时回退：按作者反查后再比对 imageUrl 中的 fileId：
 
-```bash
-curl -s --max-time 20 "https://api.avtrdb.com/v3/avatar/search/vrcx?authorId=<ownerUserId>" \
-  -H "Referer: https://vrcx.app"
-# 然后在本地的 json 里找 imageUrl 含该 fileId 的条目（用 convert json_query 或 python）
+```
+fetch(url="https://api.avtrdb.com/v3/avatar/search/vrcx?authorId=<ownerUserId>",
+      headers=["Referer: https://vrcx.app"])
+# 然后在返回的 json 里找 imageUrl 含该 fileId 的条目（用 convert json_query 或 python）
 ```
 
 命中 → 拿到 `id`（`avtr_xxx`）、`name`、`authorName`、`releaseStatus`。
@@ -91,26 +92,29 @@ curl -s --max-time 20 "https://api.avtrdb.com/v3/avatar/search/vrcx?authorId=<ow
 
 **收藏**（POST 官方 API）：
 
-```bash
-curl -s -X POST "https://api.vrchat.cloud/api/1/favorites?apiKey=<key>" \
-  -H "Cookie: auth=<token>" -H "User-Agent: ..." -H "Content-Type: application/json" \
-  -d '{"type":"avatar","favoriteId":"avtr_xxx","tags":["avatars"]}'
+```
+fetch(url="https://api.vrchat.cloud/api/1/favorites?apiKey=<key>",
+      method="POST",
+      headers=["Cookie: auth=<token>",
+               "User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)",
+               "Content-Type: application/json"],
+      body="{\"type\":\"avatar\",\"favoriteId\":\"avtr_xxx\",\"tags\":[\"avatars\"]}")
 ```
 
-**换装**（PUT）：
+**换装**（PUT 方法，fetch 只支持 GET/POST——用 python 发起；python 自带 OpenSSL，沙箱内可用）：
 
 ```bash
-curl -s -X PUT "https://api.vrchat.cloud/api/1/avatars/avtr_xxx/select?apiKey=<key>" \
-  -H "Cookie: auth=<token>" -H "User-Agent: ..."
+python -c "import urllib.request; r=urllib.request.Request('https://api.vrchat.cloud/api/1/avatars/avtr_xxx/select?apiKey=<key>', method='PUT', headers={'Cookie':'auth=<token>','User-Agent':'AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)'}); print(urllib.request.urlopen(r, timeout=20).read().decode())"
 ```
 
 （认证/apiKey 细节见 SKILL.md 认证章节与 vrchat-api.md。）
 
 ### 关键词搜索第三方库（官方 API 之外）
 
-```bash
-curl -s --max-time 20 "https://api.avtrdb.com/v3/avatar/search/vrcx?search=<关键词>&n=5000" \
-  -H "Referer: https://vrcx.app"
+```
+fetch(url="https://api.avtrdb.com/v3/avatar/search/vrcx?search=<关键词>&n=5000",
+      headers=["Referer: https://vrcx.app"],
+      max_bytes=500000)
 ```
 适合官方 API 搜不到、或想找特定来源/特定作者的模型时使用。n 上限 5000。
 

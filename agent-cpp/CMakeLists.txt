@@ -355,6 +355,18 @@ if(MSVC)
 endif()
 target_link_libraries(aoi-cache-lab PRIVATE CURL::libcurl ws2_32)
 
+# fetch tool validation tests + live-check mode.
+add_executable(aoi-fetch-test
+  tests/fetch_test.cpp
+  src/fetch_tools.cpp
+  src/http_client.cpp
+)
+target_include_directories(aoi-fetch-test PRIVATE src third_party third_party/nlohmann)
+if(MSVC)
+  target_compile_options(aoi-fetch-test PRIVATE /utf-8 /permissive-)
+endif()
+target_link_libraries(aoi-fetch-test PRIVATE CURL::libcurl ws2_32)
+
 # Dev tool: generate a real speech wav via MiMo TTS for cache experiments.
 add_executable(aoi-tts-gen
   tests/tts_gen.cpp

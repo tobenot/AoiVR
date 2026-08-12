@@ -57,9 +57,10 @@ ToolDefinition makeBashTool() {
   t.label = "bash";
   t.description =
       "Run a shell command on the user's Windows machine and return its output. Use sparingly and only for what the user asked. "
-      "Tips: get the current time with `date /t` (always available); for network requests use `curl -s --max-time 15 <url>` "
-      "and prefer https endpoints that are reachable from China (e.g. baidu.com). If an https request fails with exit 35, "
-      "the endpoint's TLS is unreachable - try another host or use `curl -k`.";
+      "Tips: get the current time with `date /t` (always available). "
+      "NEVER use curl/wget/Invoke-WebRequest/Invoke-RestMethod for network requests: the sandbox cannot do TLS "
+      "(curl exits with error 35), so those always fail. Use the `fetch` tool instead - it supports custom headers, "
+      "cookies, GET/POST and works reliably.";
   t.parameters = {
       {"type", "object"},
       {"properties", nlohmann::json{{"command", {{"type", "string"}, {"description", "The command to run"}}}}},

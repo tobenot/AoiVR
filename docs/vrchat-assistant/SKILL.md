@@ -1,13 +1,24 @@
 ---
 name: vrchat-assistant
-description: VRChat 集成操作技能。当用户提到 VRChat / VRCX / 世界 / 地图 / 房间 / 模型 / 头像 / 好友 / 通知 / 推荐房间 / 传送 / 加入世界 / 换模型 等任何 VRChat 相关需求时使用，即使没有明说 "VRChat"（例如 "帮我找个恐怖房间"、"我朋友在哪"、"推荐个新地图"）。本技能提供完整操作知识：从 VRCX 数据库提取登录会话、调用 VRChat 官方 API（搜索/推荐/过滤/排序世界与模型、查询好友与通知、传送与换装）、以及深链启动游戏。配合 sql_query / convert / bash 工具使用，让 AI 自主完成从取凭据到最终操作的完整链路。
+description: VRChat 集成操作技能。当用户提到 VRChat / VRCX / 世界 / 地图 / 房间 / 模型 / 头像 / 好友 / 通知 / 推荐房间 / 传送 / 加入世界 / 换模型 等任何 VRChat 相关需求时使用，即使没有明说 "VRChat"（例如 "帮我找个恐怖房间"、"我朋友在哪"、"推荐个新地图"）。本技能提供完整操作知识：从 VRCX 数据库提取登录会话、调用 VRChat 官方 API（搜索/推荐/过滤/排序世界与模型、查询好友与通知、传送与换装）、以及深链启动游戏。配合 sql_query / convert / fetch 工具使用，让 AI 自主完成从取凭据到最终操作的完整链路。铁律：**好友在线状态、当前位置、世界热度、当前通知等实时/非历史/非累积数据，必须先调 VRChat API 现查，严禁凭记忆、猜答案或拿旧数据作答**。
 ---
 
 # VRChat 助手（vrchat-assistant）
 
 让 AI 自主完成 VRChat 相关操作：**读 VRCX 数据库拿会话 → 调 VRChat API → 按需过滤排序 → 呈现结果 / 启动游戏**。
 
-本技能是知识型技能——它不新增工具，而是教会你使用现有的 `sql_query` / `convert` / `bash`（curl / python）工具完成 VRChat 操作。先读本文件，需要端点/表结构细节时再按索引读 `references/` 下的文件。
+本技能是知识型技能——它不新增工具，而是教会你使用现有的 `sql_query` / `convert` / `fetch`（以及本地 `bash`/python）工具完成 VRChat 操作。先读本文件，需要端点/表结构细节时再按索引读 `references/` 下的文件。
+
+## ⚠️ 铁律：实时数据必须先查 API（违反 = 答错）
+
+**在线好友、用户当前位置、世界/房间当前热度与在线人数、待处理通知、当前头像——这些数据是"瞬间状态"，不会记在本地，也绝不可凭印象编造。** 每次被问到时都必须先调用 VRChat API 现查：
+
+- "我朋友在哪 / 谁在线" → `GET /auth/user/friends`（实时，**不能**用记忆或旧 Feed 推断）
+- "这个房间多少人 / 哪个世界最火" → `GET /worlds`（实时 heat/popularity/online）
+- "有没有新通知" → `GET /auth/user/notifications`（当前时刻）
+- 任何"现在/当前/目前/正在"的问题，默认都要先查 API
+
+只有**历史/累积数据**（游戏日志、好友动态 Feed 时间线、活动热力图、备注、访问历史）才用 VRCX 本地数据库。
 
 ## 能力边界
 
@@ -34,12 +45,13 @@ description: VRChat 集成操作技能。当用户提到 VRChat / VRCX / 世界 
 
 ## 认证：三步拿到可用会话
 
-VRChat API 需要两个东西：`apiKey`（公开，无需登录）和 `auth` cookie（用户会话）。完整链路如下，全部用 bash/python 完成：
+VRChat API 需要两个东西：`apiKey`（公开，无需登录）和 `auth` cookie（用户会话）。**所有网络请求一律用 `fetch` 工具**（沙箱 bash 无法做 TLS，curl 会以错误 35 失败）：
 
 ### 第 1 步：取 apiKey（公开，无需登录）
 
-```bash
-curl -s --max-time 20 "https://api.vrchat.cloud/api/1/config" -H "User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)"
+```
+fetch(url="https://api.vrchat.cloud/api/1/config",
+      headers=["User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)"])
 ```
 响应 JSON 中的 API 密钥字段**以实际响应为准**：旧版本叫 `apiKey`，当前版本已更名为 **`clientApiKey`**（读取时两种都试）。该密钥当前多数端点已不强制，但携带兼容性最好（`?apiKey=<值>` 或 `?clientApiKey=<值>`）。
 
@@ -59,14 +71,16 @@ python -c "import sqlite3,base64,json,os; p=os.path.expandvars(r'%APPDATA%\VRCX\
 
 ### 第 3 步：带凭据调用 API
 
-```bash
-set AUTH=<token>
-curl -s --max-time 20 "https://api.vrchat.cloud/api/1/auth/user?apiKey=<key>" -H "Cookie: auth=%AUTH%" -H "User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)" -H "Accept: application/json"
+```
+fetch(url="https://api.vrchat.cloud/api/1/auth/user?apiKey=<key>",
+      headers=["Cookie: auth=<token>",
+               "User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)",
+               "Accept: application/json"])
 ```
 
 - **User-Agent 必须带联系方式**（项目名 + 仓库/邮箱），否则返回 401。
 - 响应含 `error` 字段即失败；`401` 通常表示 cookie 失效（让用户重新登录 VRCX）。
-- 大响应（世界/好友列表）建议 `-o %TEMP%\x.json` 落盘后用 `read` 或 python 处理，避免截断。
+- 大响应（世界/好友列表）：把 `fetch` 的 `max_bytes` 调大（如 200000），一次拿全；或分页拉取。
 
 ### 认证过期处理
 

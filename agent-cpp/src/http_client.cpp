@@ -72,6 +72,14 @@ std::once_flag g_curlInitFlag;
 void ensureCurlInit() {
   std::call_once(g_curlInitFlag, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
 }
+
+// Hard total + connect timeouts (used by the fetch tool; 0 = no timeout).
+void applyTimeout(CURL* curl, int timeoutMs) {
+  if (timeoutMs <= 0) return;
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeoutMs));
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                   static_cast<long>((std::min)(timeoutMs, 5000)));
+}
 } // namespace
 
 HttpClient::~HttpClient() { delete impl_; }
@@ -88,7 +96,7 @@ void* HttpClient::handle() {
 HttpClient::Result HttpClient::postStream(const std::string& url,
                                           const std::vector<std::string>& headers,
                                           const std::string& body, OnData onData,
-                                          CancelCheck cancel) {
+                                          CancelCheck cancel, int timeoutMs) {
   StreamCtx ctx;
   ctx.onData = std::move(onData);
   ctx.cancel = std::move(cancel);
@@ -134,13 +142,18 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerList);
   }
 
-  // Follow redirects (some providers 301/302).
+  // Follow redirects (some providers 301/302), but never off http/https
+  // (a 302 to ftp:// or file:// must not be followed).
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+  curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS,
+                   static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS));
 
   // Windows-native TLS (Schannel), no OpenSSL needed.
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+
+  applyTimeout(curl, timeoutMs);
 
   const CURLcode res = curl_easy_perform(curl);
   long status = 0;
@@ -164,12 +177,13 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
 
 HttpClient::Result HttpClient::post(const std::string& url,
                                     const std::vector<std::string>& headers,
-                                    const std::string& body) {
-  return postStream(url, headers, body, nullptr);
+                                    const std::string& body, int timeoutMs) {
+  return postStream(url, headers, body, nullptr, nullptr, timeoutMs);
 }
 
 HttpClient::Result HttpClient::get(const std::string& url,
-                                   const std::vector<std::string>& headers) {
+                                   const std::vector<std::string>& headers,
+                                   int timeoutMs) {
   StreamCtx ctx;
   std::vector<std::pair<std::string, std::string>> resultHeaders;
 
@@ -189,10 +203,13 @@ HttpClient::Result HttpClient::get(const std::string& url,
   curl_easy_setopt(curl, CURLOPT_HEADERDATA, &resultHeaders);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
   curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+  curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS,
+                   static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS));
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
   curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+  applyTimeout(curl, timeoutMs);
 
   curl_slist* headerList = nullptr;
   for (const auto& h : headers) {

@@ -29,7 +29,7 @@ if not exist "%BUILD%\CMakeCache.txt" (
 if errorlevel 1 ( echo [GATE] build failed & exit /b 1 )
 
 rem --- 2. Run every test suite; any nonzero/abnormal => gate failed ---
-set TESTS=aoi-smoke-tests aoi-registry-tests aoi-skills-tests aoi-sse-tests aoi-llm-tests aoi-transport-tests aoi-dll-tests aoi-stability-tests
+set TESTS=aoi-smoke-tests aoi-registry-tests aoi-skills-tests aoi-sse-tests aoi-llm-tests aoi-transport-tests aoi-dll-tests aoi-stability-tests aoi-fetch-test
 for %%T in (%TESTS%) do (
     echo.
     echo ===== [GATE] %%T =====

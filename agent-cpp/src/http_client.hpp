@@ -50,19 +50,22 @@ class HttpClient {
   // POST with streaming response. headers includes "Content-Type: ..." etc.
   // The Authorization header must be supplied by the caller. When onData is
   // null, the full body is accumulated. When cancel returns true, the transfer
-  // is aborted promptly (returns status -1).
+  // is aborted promptly (returns status -1). timeoutMs > 0 applies a hard
+  // total + connect timeout (the fetch tool uses it; the LLM/TTS streams pass
+  // 0 and keep the wait-indefinitely behavior).
   Result postStream(const std::string& url, const std::vector<std::string>& headers,
                     const std::string& body, OnData onData = nullptr,
-                    CancelCheck cancel = nullptr);
+                    CancelCheck cancel = nullptr, int timeoutMs = 0);
 
   // Simple GET returning the full body (used by the fetch tool; runs in the
   // agent process - the sandbox's CreateProcessAsUserW children cannot use
   // schannel, SEC_E_NO_CREDENTIALS).
-  Result get(const std::string& url, const std::vector<std::string>& headers = {});
+  Result get(const std::string& url, const std::vector<std::string>& headers = {},
+             int timeoutMs = 0);
 
   // Simple POST returning full body.
   Result post(const std::string& url, const std::vector<std::string>& headers,
-              const std::string& body);
+              const std::string& body, int timeoutMs = 0);
 
  private:
   void* handle();

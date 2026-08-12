@@ -21,9 +21,9 @@ vrchat://launch?ref=<来源>&id=<worldId>:<instanceId>&shortName=<短名>
 
 ### 短名获取
 
-```bash
-curl -s "https://api.vrchat.cloud/api/1/instances/{worldId}:{instanceId}/shortName?apiKey=<key>" \
-  -H "Cookie: auth=<token>" -H "User-Agent: ..."
+```
+fetch(url="https://api.vrchat.cloud/api/1/instances/{worldId}:{instanceId}/shortName?apiKey=<key>",
+      headers=["Cookie: auth=<token>", "User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)"])
 ```
 - 返回 `{"shortName":"abc12345"}`；私有实例返回 `secureName`（更长的安全短名）。
 - 也可反查：`GET instances/s/{shortName}`。

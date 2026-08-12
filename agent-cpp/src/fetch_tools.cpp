@@ -145,6 +145,22 @@ ToolDefinition makeFetchTool() {
       if (!parseHeaders(args, &headers, &err)) {
         return nlohmann::json{{"status", 0}, {"content", err}};
       }
+      // Default User-Agent: VRChat's WAF rejects requests without a proper
+      // UA (403 waf_code 13799) - the model forgetting it cost 3 wasted
+      // retries in regression. Add it unless the caller supplied one.
+      bool hasUA = false;
+      for (const auto& h : headers) {
+        const size_t colon = h.find(':');
+        if (colon != std::string::npos &&
+            lower(h.substr(0, colon)) == "user-agent") {
+          hasUA = true;
+          break;
+        }
+      }
+      if (!hasUA) {
+        headers.push_back(
+            "User-Agent: AoiVR/0.1.0 (https://github.com/keybodhi/AoiVR)");
+      }
 
       const long timeoutMs =
           clampLong(args.value("timeout_ms", 15000), 1000, 60000);
@@ -204,7 +220,8 @@ ToolDefinition makeFetchTool() {
         if (!saved.empty())
           b += "\n...(truncated: full response " + std::to_string(fullSize) +
                " bytes saved to " + saved +
-               " (sandbox workspace); use read with offset to page through)";
+               " (sandbox workspace); count/filter it with convert: "
+               "json_query_file(data=\"" + saved + "\", filter=\"<field>!=<value>\", count=true))";
         else
           b += "\n...(truncated: response exceeds " + std::to_string(maxBytes) + " bytes)";
       }

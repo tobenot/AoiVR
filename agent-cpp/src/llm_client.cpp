@@ -754,6 +754,15 @@ void LlmSession::maybeCompressHistory() {
           "Output ONLY the summary, in the same language as the chat.";
       sc.tools.clear();
       LlmSession summarizer(sc);
+      // CRITICAL: wire the SAME cancel source and a log sink. The summarizer
+      // runs a full HTTP request BEFORE the main prompt; without a cancel
+      // source the host's "interrupt everything" cannot reach it (observed
+      // live: a stuck summarizer wedged the message thread for minutes, the
+      // follow-up turn's interrupt had no effect, and nothing was logged
+      // because there was no log sink).
+      summarizer.setCancelSource([this]() { return isCancelled(); });
+      summarizer.setLogSink(
+          [this](const std::string& line) { log(std::string("[LLM][compress] ") + line); });
       std::string got;
       summarizer.subscribe([&](const SessionEvent& e) {
         if (e.type == "message_update") got += e.delta;

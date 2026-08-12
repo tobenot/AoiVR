@@ -128,10 +128,17 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
   // encoding keeps the raw SSE bytes flowing.
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "identity");
 
-  // NO connect timeout and NO low-speed guard: aligned with opencode on Bun,
-  // which waits indefinitely. A stalled/hung stream is terminated only by
-  // cancellation or the caller's retry budget.
+  // NO connect timeout and NO total timeout: aligned with opencode on Bun,
+  // which waits indefinitely for slow streams...
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+  // ...BUT a silently dead stream must not wedge the agent forever: abort
+  // when fewer than 1 byte/sec flows (either direction) for 90 consecutive
+  // seconds. The abort surfaces as CURLE_OPERATION_TIMEDOUT, which the
+  // caller's stream-retry layer re-issues on a FRESH connection. Live
+  // incident: a dead stream hung two consecutive turns for minutes with zero
+  // bytes and no recovery until process restart.
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+  curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 90L);
 
   // Headers.
   curl_slist* headerList = nullptr;

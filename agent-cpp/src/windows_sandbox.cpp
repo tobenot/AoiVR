@@ -492,9 +492,17 @@ void ensureSandboxReady() {
       // to create/modify system-provided skills (their catalog is injected
       // into the model's context) - same protection as AGENTS.md. User skills
       // live in sandbox/skills_user and stay writable.
+      // NOTE: DENY WRITE ONLY - the model must be able to READ SKILL.md files
+      // (the catalog tells it to read skills/<name>/SKILL.md). FILE_ALL_ACCESS
+      // denied reads too (observed: model's read of skills/vrchat-assistant/
+      // SKILL.md failed with "file not found" every time, so it never learned
+      // the workflow and hallucinated numbers).
       const std::string sysSkills = g_workspacePath + "\\skills";
       { std::error_code ec; std::filesystem::create_directories(sysSkills, ec); }
-      if (!applyAceToPath(sysSkills, DENY_ACCESS, FILE_ALL_ACCESS,
+      constexpr DWORD kSkillDenyMask =
+          FILE_GENERIC_WRITE | FILE_ADD_SUBDIRECTORY | FILE_DELETE_CHILD |
+          DELETE | WRITE_DAC | WRITE_OWNER;
+      if (!applyAceToPath(sysSkills, DENY_ACCESS, kSkillDenyMask,
                           reinterpret_cast<PSID>(userSid.data())))
         std::fprintf(stderr, "[Sandbox] WARNING: DENY sandbox/skills failed, err=%lu\n", GetLastError());
       // VRCX companion database (VRChat auth session store used by the

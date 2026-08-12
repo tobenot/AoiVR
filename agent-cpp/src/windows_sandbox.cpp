@@ -765,8 +765,17 @@ std::string sandboxExecuteInner(const std::string& opJson) {
   // produces mojibake (CreateProcessWithLogonW would fail on any non-ASCII
   // install path).
   const std::wstring wsSandboxW = sandboxWorkspacePathW();
-  const std::wstring exeDirW = wsSandboxW.substr(
-      0, wsSandboxW.size() - std::wstring(L"sandbox").size());
+  // exeDir = workspace minus the trailing "sandbox" (7 chars). CRITICAL: the
+  // result ends with a backslash, and a trailing "\" inside a quoted command-
+  // line argument is parsed by CommandLineToArgvW as an ESCAPED QUOTE - the
+  // helper's argv[3] comes out wrong (e.g. `Release"`), the exeDir fallback
+  // for read resolves to a broken path, and reading shipped files
+  // (docs/..., SKILL.md) silently fails. Strip the trailing separator.
+  std::wstring exeDirW =
+      wsSandboxW.substr(0, wsSandboxW.size() - std::wstring(L"sandbox").size());
+  while (!exeDirW.empty() &&
+         (exeDirW.back() == L'\\' || exeDirW.back() == L'/'))
+    exeDirW.pop_back();
   std::wstring cmdLine = L"\"" + helperW + L"\" \"" + wsSandboxW + L"\" \"" +
                          utf8ToWide(g_capSidStr) + L"\" \"" + exeDirW + L"\"";
 
@@ -868,7 +877,14 @@ std::string sandboxExecuteInner(const std::string& opJson) {
   CloseHandle(pi.hProcess);
   if (job) CloseHandle(job);
 
-  if (out.empty()) return R"json({"ok":false,"error":"(sandbox: helper produced no output)"})json";
+  if (out.empty()) {
+    // Diagnose silent helper exits (crash / missing output) with the exit
+    // code so the failure is visible instead of a bare "no output".
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    return R"json({"ok":false,"error":"(sandbox: helper produced no output")json" +
+           std::string(", exit=") + std::to_string(code) + ")}";
+  }
   return out;
 }
 

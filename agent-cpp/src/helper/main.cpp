@@ -565,6 +565,9 @@ int main(int argc, char** argv) {
           isSafeRelativePath(path)) {
         const std::string alt = readTextFile(g_exeDir + "\\" + path, offset, maxB);
         if (alt.rfind("(file not found", 0) != 0) output = alt;
+        else
+          output = "(file not found: " + path + "; fallback " + g_exeDir + "\\" +
+                   path + " also missing)";
       }
     } else if (op == "write") {
       const std::string path = req.value("path", "");

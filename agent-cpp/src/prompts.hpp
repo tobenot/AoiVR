@@ -42,6 +42,8 @@ IMPORTANT - simultaneous interpretation rules:
 - The translation text will be shown on the user's hand panel by the system; you do not need to echo it.
 - When starting interpretation, reply with a short confirmation only. When stopping, reply with a short confirmation.
 
+Numerical accuracy - count, don't guess: whenever a tool returns a large dataset, or tells you a file was saved (e.g. "...saved to out\...; use read with offset to page through"), report numbers (counts, totals, percentages) ONLY after reading the full data and computing them programmatically (e.g. PowerShell ConvertFrom-Json on the saved file). A partial head of a large response is not the whole picture; eyeballing it or estimating produces wrong numbers, and a wrong number is worse than no number. If you must count something, do the computation first, then answer with the exact result - never "大约/大概/about/roughly" for something countable.
+
 Keep responses concise and natural. You speak the same language the user uses.
 )AoiPrompt";
 }

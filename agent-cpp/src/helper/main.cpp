@@ -364,7 +364,19 @@ std::string runBash(const std::string& cmd) {
   WaitForSingleObject(pi.hProcess, 5000);
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
-  if (out.empty()) out = "(no output)";
+  if (out.empty()) {
+    // PowerShell/pwsh under the sandbox user fail to start (USER32-dependent:
+    // the restricted desktop can't host them) and produce NO output. Surface
+    // that immediately instead of letting the model retry it four times
+    // (observed in regression: 4 wasted turns before switching tools).
+    if (cmd.find("powershell") != std::string::npos ||
+        cmd.find("pwsh") != std::string::npos) {
+      out = "(no output: PowerShell cannot run under the sandbox user - use "
+            "convert json_query_file for JSON stats instead)";
+    } else {
+      out = "(no output)";
+    }
+  }
   if (!spillPath.empty() && totalBytes > kHead) {
     aoi::utf8SafeTruncate(out, kHead);
     out += "\n...(truncated: full output " + std::to_string(totalBytes) +

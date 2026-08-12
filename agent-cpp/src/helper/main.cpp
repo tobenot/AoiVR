@@ -33,6 +33,7 @@
 
 #include "base64.h"
 #include "nlohmann/json.hpp"
+#include "agent_utils.hpp"
 
 using json = nlohmann::json;
 
@@ -99,7 +100,11 @@ std::string readTextFile(const std::string& path, size_t maxBytes = 60000) {
     total += take;
     if (total >= maxBytes) break;
   }
-  if (out.size() >= maxBytes) out += "\n...(truncated)";
+  if (out.size() >= maxBytes) {
+    // UTF-8-boundary cut before appending the notice (same reason as bash).
+    aoi::utf8SafeTruncate(out, maxBytes);
+    out += "\n...(truncated)";
+  }
   return out;
 }
 
@@ -317,7 +322,9 @@ std::string runBash(const std::string& cmd) {
   CloseHandle(pi.hProcess);
   if (out.empty()) out = "(no output)";
   if (out.size() > 30000) {
-    out.resize(30000);
+    // UTF-8-boundary cut: a mid-sequence split would break JSON dumps of the
+    // conversation history later (nlohmann type_error.316).
+    aoi::utf8SafeTruncate(out, 30000);
     out += "\n...(truncated)";
   }
   return out;
@@ -394,7 +401,7 @@ std::string runSqlQuery(const std::string& path, const std::string& sql) {
   std::string text = out.dump();
   constexpr size_t kMax = 30000;
   if (text.size() > kMax) {
-    text.resize(kMax);
+    aoi::utf8SafeTruncate(text, kMax);
     text += "\n...(truncated)";
   }
   return text;

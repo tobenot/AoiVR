@@ -98,6 +98,17 @@ if (Test-Path $skillSrc) {
   Copy-Item $skillSrc $skillDst -Recurse -Force
 }
 
+# ALSO install the skill into sandbox\skills: the agent's system-prompt skill
+# catalog (loadSkills) scans that directory at runtime. Without it the model
+# never learns the skill exists and fumbles around public docs instead.
+$skillSandboxDst = Join-Path $OutDir "sandbox\skills\vrchat-assistant"
+if (Test-Path $skillSrc) {
+  if (Test-Path $skillSandboxDst) { Remove-Item $skillSandboxDst -Recurse -Force }
+  New-Item -ItemType Directory -Path $skillSandboxDst -Force | Out-Null
+  Copy-Item $skillSrc\* $skillSandboxDst -Recurse -Force
+  Write-Host "  + skill installed: sandbox\skills\vrchat-assistant"
+}
+
 Write-Host "==> 4/4 launch.bat"
 $launch = @'
 @echo off

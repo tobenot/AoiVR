@@ -262,14 +262,10 @@ public class HandPanelUI : MonoBehaviour
     // Whether this turn has used a tool ("检索" stage). Kept for the meta
     // display (procbar only; the in-statusbar pstep dots were removed).
     private bool procSawRetrieve_ = false;
-    // Marquee scroll state: when the thought stream is wider than the panel,
-    // the text scrolls horizontally so updates stay visible (one line only).
-    // The scroll position is CONTINUOUS: it is kept across tool-call refreshes
-    // and new content continues from where it stopped; only a new turn
-    // ("understand") resets it.
-    private float procScrollX = 0f;
-    private float procScrollTarget = 0f;      // max offset = textW - contentW
-    private const float procScrollSpeed = 45f; // px/s
+    // One line, NO marquee: when the thought stream outgrows the panel we show
+    // its tail anchored at a complete sentence start (never half a sentence).
+    // Inner text width = max panel width (616) - 12px margins on both sides.
+    private const float procTextMaxWidth = 616f - 24f;
 
     public void SetProcessingStage(string stage, string thought = null)
     {
@@ -278,19 +274,19 @@ public class HandPanelUI : MonoBehaviour
         {
             procFadeStart = Time.unscaledTime;
             procSawRetrieve_ = false;
-            ResetProcScroll();
             return;
         }
         ShowProcessing(true);
         if (stage == "retrieve") procSawRetrieve_ = true;
 
         // thought summary replaces in place (mockup: "▸ 他在问这家店还开不开…")
-        procbarText.text = "▸ " + (string.IsNullOrEmpty(thought)
+        string body = string.IsNullOrEmpty(thought)
             ? (stage switch { "understand" => "正在理解…", "retrieve" => "正在检索…", _ => "正在生成…" })
-            : thought);
+            : thought;
+        // Re-anchor on every update: the visible text starts at the newest
+        // complete sentence boundary, so the line never begins mid-sentence.
+        procbarText.text = TrimThoughtToFit("▸ " + body, procTextMaxWidth);
         // Width: min 300 (default length), max fills the row (684 - 34*2 margins).
-        // If the text doesn't fit, the marquee scroll reveals it progressively
-        // (mask + horizontal scroll) instead of truncating the tail.
         procbarText.ForceMeshUpdate();
         var procbar = procbarText.transform.parent;
         var rt = procbar.GetComponent<RectTransform>();
@@ -306,18 +302,68 @@ public class HandPanelUI : MonoBehaviour
                     new Color(0.953f, 0.902f, 0f, 0.4f),
                     new Color(0.016f, 0.024f, 0.055f, 0.9f));
         }
-        // Marquee: keep the scroll position continuous. A new turn starts at
-        // the left; every other update (thinking growth, tool refresh, resume)
-        // continues from the current offset so already-read content is not
-        // shown again.
-        if (stage == "understand")
+    }
+
+    // Fits the procbar text into maxW on one line without scrolling. If the
+    // text is too wide, the oldest sentences are dropped so the visible text
+    // always starts at a complete sentence boundary. If even a single
+    // sentence overflows, its complete start is kept and the tail is cut with
+    // "…" (start stays whole; only the end may be abbreviated).
+    string TrimThoughtToFit(string full, float maxW)
+    {
+        if (string.IsNullOrEmpty(full)) return full;
+        if (ProcTextWidth(full) <= maxW) return full;
+        int n = full.Length;
+        int lastBoundary = -1;
+        for (int i = 0; i < n - 1; i++)
+            if (IsSentenceEnd(full[i])) lastBoundary = i + 1;
+        if (lastBoundary <= 0)
+            return CutTail(full, maxW);  // no sentence boundary yet: keep the start
+        // Walk backwards from the newest boundary: keep the earliest boundary
+        // whose suffix still fits (longest complete-sentence tail that fits).
+        int best = lastBoundary;
+        for (int i = lastBoundary - 2; i >= 0; i--)
         {
-            procScrollX = 0f;
+            if (!IsSentenceEnd(full[i])) continue;
+            int cand = i + 1;
+            if (ProcTextWidth(full.Substring(cand)) > maxW) break;
+            best = cand;
         }
-        procScrollTarget = Mathf.Max(0f, procbarText.preferredWidth - (w - 24f));
-        if (procScrollX > procScrollTarget)
-            procScrollX = procScrollTarget;  // text got shorter (e.g. tool stage): clamp
-        ApplyProcScroll();
+        string tail = full.Substring(best);
+        if (ProcTextWidth(tail) > maxW)
+            return CutTail(tail, maxW);
+        return tail;
+    }
+
+    // Sentence/clause endings: CJK + ASCII punctuation, so the visible start
+    // is a complete sentence (or clause), never the middle of one.
+    static bool IsSentenceEnd(char c)
+    {
+        return c == '。' || c == '！' || c == '？' || c == '；' || c == '：' ||
+               c == '，' || c == '、' ||
+               c == '.' || c == '!' || c == '?' || c == ';' || c == ':' ||
+               c == ',' || c == '\n';
+    }
+
+    float ProcTextWidth(string s)
+    {
+        return procbarText.GetPreferredValues(s).x;
+    }
+
+    // Cut the tail so the string fits maxW, appending "…" (the start stays
+    // complete; only the end is abbreviated).
+    string CutTail(string s, float maxW)
+    {
+        if (ProcTextWidth(s) <= maxW) return s;
+        const string ell = "…";
+        int lo = 0, hi = s.Length;
+        while (lo < hi)
+        {
+            int mid = (lo + hi + 1) / 2;
+            if (ProcTextWidth(s.Substring(0, mid) + ell) <= maxW) lo = mid;
+            else hi = mid - 1;
+        }
+        return s.Substring(0, lo) + ell;
     }
 
     public void ShowProcessing(bool show)
@@ -337,23 +383,7 @@ public class HandPanelUI : MonoBehaviour
     {
         procFadeStart = -1f;
         procSawRetrieve_ = false;
-        ResetProcScroll();
         ShowProcessing(false);
-    }
-
-    void ResetProcScroll()
-    {
-        procScrollX = 0f;
-        procScrollTarget = 0f;
-        ApplyProcScroll();
-    }
-
-    void ApplyProcScroll()
-    {
-        if (procbarText == null) return;
-        var ptRT = procbarText.rectTransform;
-        ptRT.offsetMin = new Vector2(12f - procScrollX, ptRT.offsetMin.y);
-        ptRT.offsetMax = new Vector2(-12f - procScrollX, ptRT.offsetMax.y);
     }
 
     public void UpdateProcessing()
@@ -366,23 +396,12 @@ public class HandPanelUI : MonoBehaviour
                 procbarCanvasGroup.alpha = 0f;
                 procbarCanvasGroup.gameObject.SetActive(false);
                 procFadeStart = -1f;
-                ResetProcScroll();
                 ShowProcessing(false);
             }
             else
             {
                 procbarCanvasGroup.alpha = 1f - t / procFadeDuration;
             }
-        }
-        // Marquee: advance until the tail; stop there. New content (a longer
-        // thought stream) raises the target on the next SetProcessingStage and
-        // scrolling resumes from the current offset automatically.
-        if (procScrollTarget > 0f && procScrollX < procScrollTarget)
-        {
-            procScrollX += procScrollSpeed * Time.unscaledDeltaTime;
-            if (procScrollX >= procScrollTarget)
-                procScrollX = procScrollTarget;
-            ApplyProcScroll();
         }
     }
 

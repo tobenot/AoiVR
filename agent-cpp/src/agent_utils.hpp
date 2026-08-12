@@ -20,4 +20,10 @@ bool isTtsJunk(const std::string& text);
 // the delimiter at the end. Mirrors the JS SENTENCE_DELIMITERS lookbehind.
 std::vector<std::string> splitSentences(const std::string& s);
 
+// Truncate to at most maxBytes WITHOUT splitting a multi-byte UTF-8
+// character: a mid-sequence cut produces invalid UTF-8, and any later JSON
+// serialization of the string (nlohmann dump) throws type_error.316
+// ("invalid UTF-8 byte at index ...").
+void utf8SafeTruncate(std::string& s, size_t maxBytes);
+
 } // namespace aoi

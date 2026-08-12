@@ -4,6 +4,7 @@
 #include <string>
 
 #include "fetch_tools.hpp"
+#include "agent_utils.hpp"
 
 namespace {
 
@@ -65,6 +66,34 @@ int main(int argc, char** argv) {
                                             {"method", "POST"},
                                             {"body", big}}),
                 "body exceeds 1MB", "rejects oversized body");
+
+  // UTF-8-safe truncation: cutting inside a 3-byte CJK char must back off to
+  // the character boundary (the truncated string must re-serialize as JSON).
+  {
+    std::string s = "ab";
+    s += "\xE4\xB8\xAD";  // 中 (3 bytes)
+    s += "cd";
+    aoi::utf8SafeTruncate(s, 3);  // cuts inside 中
+    if (s != "ab") {
+      std::printf("FAIL: utf8 truncate mid-char -> got %zu bytes\n", s.size());
+      ++failures;
+    } else {
+      std::puts("ok: utf8 truncate mid-char backs off");
+    }
+    s = "ab";
+    s += "\xE4\xB8\xAD";
+    s += "cd";
+    aoi::utf8SafeTruncate(s, 5);  // 中 fits whole
+    if (s != std::string("ab") + "\xE4\xB8\xAD") {
+      std::printf("FAIL: utf8 truncate whole-char -> got %zu bytes\n", s.size());
+      ++failures;
+    } else {
+      std::puts("ok: utf8 truncate keeps whole char");
+    }
+    // And the truncated text must survive nlohmann serialization.
+    const std::string dumped = nlohmann::json(s).dump();
+    (void)dumped;
+  }
 
   std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
   if (failures) return 1;

@@ -197,6 +197,7 @@ endif()
 # only place model-controlled writes execute (aligned with Codex exec-server).
 add_executable(aoi-sandbox-helper
   src/helper/main.cpp
+  src/agent_utils.cpp
   third_party/sqlite/sqlite3.c
 )
 target_include_directories(aoi-sandbox-helper PRIVATE
@@ -359,6 +360,7 @@ target_link_libraries(aoi-cache-lab PRIVATE CURL::libcurl ws2_32)
 add_executable(aoi-fetch-test
   tests/fetch_test.cpp
   src/fetch_tools.cpp
+  src/agent_utils.cpp
   src/http_client.cpp
 )
 target_include_directories(aoi-fetch-test PRIVATE src third_party third_party/nlohmann)

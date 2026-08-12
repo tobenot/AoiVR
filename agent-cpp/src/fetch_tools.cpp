@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "agent_utils.hpp"
 #include "http_client.hpp"
 
 namespace aoi {
@@ -158,7 +159,10 @@ ToolDefinition makeFetchTool() {
       }
       std::string b = res.body;
       if (b.size() > maxBytes) {
-        b.resize(maxBytes);
+        // Truncate on a UTF-8 character boundary: a mid-sequence cut leaves
+        // invalid UTF-8 in the conversation history, and the next prompt's
+        // JSON serialization throws (type_error.316) - "SDK prompt error".
+        utf8SafeTruncate(b, maxBytes);
         b += "\n...(truncated: response exceeds " + std::to_string(maxBytes) + " bytes)";
       }
       if (b.empty()) b = "(fetch: empty response)";

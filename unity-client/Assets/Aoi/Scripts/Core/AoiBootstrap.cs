@@ -511,11 +511,11 @@ public class AoiBootstrap : MonoBehaviour
             TextAlignmentOptions.MidlineLeft, Color.yellow, false);
         procText.font = AoiOrchestrator.ResolveMonoFont();
         procText.characterSpacing = 10f;
-        // Mask (not Ellipsis): the procbar text scrolls horizontally like a
-        // marquee when the thought stream is longer than the panel, so new
-        // content stays visible. Requires a RectMask2D on the panel.
+        // Mask + no-wrap: the procbar always shows exactly one line. The text
+        // is sentence-anchored (HandPanelUI.TrimThoughtToFit) so the visible
+        // start is a complete sentence, never half of one.
         procText.overflowMode = TextOverflowModes.Masking;
-        procText.enableWordWrapping = false;  // single line; marquee scrolls horizontally
+        procText.enableWordWrapping = false;  // single line, sentence-anchored tail
         procbar.AddComponent<RectMask2D>();
         var ptRT = procText.GetComponent<RectTransform>();
         ptRT.anchorMin = Vector2.zero;

@@ -32,6 +32,25 @@ powershell -NoProfile -Command "$d = Get-Content -Raw -Encoding UTF8 out\fetch_x
 - **不要用 `findstr | find /c` 统计 JSON**：API 返回的是单行压缩 JSON，find 数的是"行数"（永远是 1），不是出现次数。
 - `convert` 的 `json_query` 适合小文档提取字段；大文件（几十 KB+）优先 PowerShell（直接读文件，不用把内容塞进工具参数）。
 
+### 好友在线判定（实测规则，两个时间点验证过）
+
+`GET /auth/user/friends?offline=false` 返回的是"平台在线"好友（含网页/启动器在线），其中**在线（与 VRChat/VRCX 界面数字一致）= `status` 为 `active` 或 `join me`**。`status` 分布语义：
+
+| status | 含义 | 算在线吗 |
+|---|---|---|
+| `active` | 在线（绿） | ✅ |
+| `join me` | 在线且欢迎加入（蓝） | ✅ |
+| `ask me` | 在线但请勿打扰（黄） | ❌（单独报"请勿打扰"数量） |
+| （不在返回里） | 真离线 | ❌ |
+
+`location` 只说明在哪：`wrld_*` 公开房间 / `private` 私密房间 / `offline` 不在游戏内（网页或启动器在线）。**不要用 location 判断在线与否**（`offline` location 的人可能 `status=active`，是网页在线）。
+
+统计命令模板（精确，勿改规则）：
+
+```bash
+powershell -NoProfile -Command "$d = Get-Content -Raw -Encoding UTF8 out\fetch_xxx.txt | ConvertFrom-Json; $online = ($d | Where-Object { $_.status -eq 'active' -or $_.status -eq 'join me' }).Count; $dnd = ($d | Where-Object { $_.status -eq 'ask me' }).Count; Write-Output \"online=$online dnd=$dnd total=$($d.Count)\""
+```
+
 ## 能力边界
 
 能做的事：
@@ -169,7 +188,7 @@ start "" "vrchat://launch?id=wrld_xxx:12345~region(us)&shortName=abc12345"
 
 ### D. 好友 / 通知 / 用户信息
 
-- 好友列表：`GET /auth/user/friends?n=100`（**在线判定**：`location` 非空且不是 `"offline"`/`"private"`/`"traveling"` 才是真的在线——Web 端登录的朋友 `location` 可能为空，误判会把不在线的也算进去）
+- 好友列表：`GET /auth/user/friends?offline=false&n=100`（**在线判定按 status**：`active`/`join me` 才算在线，`ask me` 是请勿打扰需单独报；规则见顶部"好友在线判定"，**不要按 location 判断**）
 - **报数字前必须程序化统计**（见顶部"列表统计必须程序化"铁律）：响应超限会自动存到 `out\fetch_xxx.txt`，用 PowerShell `ConvertFrom-Json` 读文件精确计数/过滤，**不要**目测、不要说"大约"。
 - 通知：`GET /auth/user/notifications?n=50`
 - 用户详情：`GET /users/{userId}`（含状态、当前世界、当前头像、信任等级）

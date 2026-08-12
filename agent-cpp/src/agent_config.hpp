@@ -13,6 +13,11 @@ struct LlmConfig {
   std::string thinking = "auto";
   // Optional "low" | "medium" | "high" -> "reasoning_effort" on the wire.
   std::string reasoningEffort;
+  // Load/persist conversation history to history.json next to the exe.
+  // Default OFF: each launch starts with a clean in-memory history (old
+  // sessions are not injected - they can mislead the model with stale
+  // conclusions, e.g. obsolete tool-capability claims).
+  bool persistHistory = false;
 };
 
 // TTS settings (aoi_config.json -> "tts").

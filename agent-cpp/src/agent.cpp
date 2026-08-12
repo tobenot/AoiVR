@@ -261,7 +261,14 @@ bool AoiAgent::start() {
       std::string dir(exeBuf);
       const size_t slash = dir.find_last_of("\\/");
       if (slash != std::string::npos) dir = dir.substr(0, slash + 1);
-      session_->setHistoryFile(dir + "history.json");
+      // history.json persistence is opt-in ("llm.persistHistory": true).
+      // Default: clean in-memory history per launch - previously persisted
+      // sessions are NOT injected, so stale conclusions (e.g. obsolete
+      // tool-capability claims from an older build) never poison a new
+      // session's context.
+      if (fileConfig_.llm.persistHistory) {
+        session_->setHistoryFile(dir + "history.json");
+      }
     }
   }
 

@@ -48,6 +48,10 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     cfg.llm.baseUrl = get(llm, "baseUrl", cfg.llm.baseUrl);
     cfg.llm.apiKey = get(llm, "apiKey", "");
     cfg.llm.model = get(llm, "model", cfg.llm.model);
+    // history.json persistence is OFF by default (clean history per launch);
+    // opt in with "persistHistory": true.
+    if (llm.contains("persistHistory") && llm["persistHistory"].is_boolean())
+      cfg.llm.persistHistory = llm["persistHistory"].get<bool>();
     const std::string t = get(llm, "thinking", cfg.llm.thinking);
     if (t == "enabled" || t == "disabled" || t == "auto") cfg.llm.thinking = t;
     // reasoningEffort: only overridden when the key is EXPLICITLY present.

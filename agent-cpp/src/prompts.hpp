@@ -52,40 +52,57 @@ Keep responses concise and natural. You speak the same language the user uses.
 }
 
 // Optional private knowledge base injection (fork feature, upstream-friendly).
-// Reads a UTF-8 file where each line is "term | short explanation" (pipe
-// separated). Returns the prompt section to append, or an empty string when
-// the path is empty or the file is missing/empty, so default behavior stays
-// identical to upstream. The content only enriches the system prompt; it is
-// never persisted anywhere else.
+// Reads a UTF-8 file where each line has FOUR pipe-separated columns:
+//   中文 | English | 日本語 | 中文解释
+// (English/Japanese columns may be empty; the explanation column is required;
+//  lines starting with '#' are comments and skipped). Returns the prompt
+// section to append, or an empty string when the path is empty or the file is
+// missing/empty, so default behavior stays identical to upstream. The content
+// only enriches the system prompt; it is never persisted anywhere else.
 inline std::string knowledgeBaseSection(const std::string& kbPath) {
   if (kbPath.empty()) return "";
   std::ifstream f(kbPath);
   if (!f.is_open()) return "";
+  const auto trim = [](std::string s) {
+    const size_t b = s.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return std::string();
+    const size_t e = s.find_last_not_of(" \t\r\n");
+    return s.substr(b, e - b + 1);
+  };
   std::string section =
       "\nMeeting knowledge base (private terms the user provided):\n";
   std::string line;
   bool any = false;
   while (std::getline(f, line)) {
-    const size_t sep = line.find('|');
-    if (sep == std::string::npos) continue;
-    std::string term = line.substr(0, sep);
-    std::string def = line.substr(sep + 1);
-    // Trim surrounding whitespace (also strips \r from CRLF line endings).
-    const auto trim = [](std::string s) {
-      const size_t b = s.find_first_not_of(" \t\r\n");
-      if (b == std::string::npos) return std::string();
-      const size_t e = s.find_last_not_of(" \t\r\n");
-      return s.substr(b, e - b + 1);
-    };
-    term = trim(term);
-    def = trim(def);
-    if (term.empty() || def.empty()) continue;
-    // Drop a UTF-8 BOM if present on the first parsed term.
-    if (!any && term.size() >= 3 && term.compare(0, 3, "\xEF\xBB\xBF") == 0) {
-      term.erase(0, 3);
-      if (term.empty()) continue;
+    std::string cols[4];
+    size_t start = 0;
+    for (int i = 0; i < 3; ++i) {
+      const size_t sep = line.find('|', start);
+      if (sep == std::string::npos) {
+        cols[i] = line.substr(start);
+        start = line.size();
+      } else {
+        cols[i] = line.substr(start, sep - start);
+        start = sep + 1;
+      }
     }
-    section += "- " + term + ": " + def + "\n";
+    cols[3] = line.substr(start);  // explanation column: rest of the line
+    for (auto& c : cols) c = trim(c);
+    if (cols[3].empty() || cols[3][0] == '#') continue;  // comment / no explanation
+    std::string head = !cols[0].empty() ? cols[0]
+                        : (!cols[1].empty() ? cols[1] : cols[2]);
+    if (head.empty()) continue;
+    // Drop a UTF-8 BOM if present on the first parsed term.
+    if (!any && head.size() >= 3 && head.compare(0, 3, "\xEF\xBB\xBF") == 0) {
+      head.erase(0, 3);
+      if (head.empty()) continue;
+    }
+    section += "- " + head + ": " + cols[3];
+    if (!cols[1].empty() && cols[1] != head) {
+      section += " (English: " + cols[1] + ")";
+    }
+    if (!cols[2].empty()) section += " (日本語: " + cols[2] + ")";
+    section += "\n";
     any = true;
   }
   return any ? section : "";

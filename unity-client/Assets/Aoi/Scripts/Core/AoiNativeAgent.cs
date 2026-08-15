@@ -121,7 +121,7 @@ public class AoiNativeAgent : MonoBehaviour
     {
         for (int i = 0; i < 60; i++)
         {
-            orchestrator = FindObjectOfType<AoiOrchestrator>();
+            orchestrator = FindFirstObjectByType<AoiOrchestrator>();
             if (orchestrator != null) break;
             yield return new UnityEngine.WaitForSeconds(0.5f);
         }
@@ -194,7 +194,7 @@ public class AoiNativeAgent : MonoBehaviour
     {
         // Drain the agent's outbox on the main thread, feeding AoiOrchestrator.
         if (orchestrator == null)
-            orchestrator = FindObjectOfType<AoiOrchestrator>();
+            orchestrator = FindFirstObjectByType<AoiOrchestrator>();
         while (agentOutbox.TryDequeue(out var json))
         {
             if (orchestrator != null)

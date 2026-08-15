@@ -646,7 +646,7 @@ var dashKey = overlayKey + "_dashboard";
         }
     }
     void UpdateInputComponent()    {
-        inputComponent = FindObjectOfType<SteamVROverlayInput>();
+        inputComponent = FindFirstObjectByType<SteamVROverlayInput>();
         if (inputComponent != null)        {
             inputComponent.textureWidth = textureWidth;
             inputComponent.textureHeight = textureHeight;
@@ -661,8 +661,6 @@ var dashKey = overlayKey + "_dashboard";
     private float lastHoldReleaseTime = -100f;
     private float lastTransformErrLog = -100f;
     private bool gripHeldRecording = false;
-    private bool doubleTapArming = false;
-    private bool autoHideLogged = false;
     private bool inputActionsReady = false;
     private ulong gripActionSetHandle = 0;
     private ulong gripActionHandle = 0;
@@ -1496,9 +1494,6 @@ var dashKey = overlayKey + "_dashboard";
     string NextScreenshotPath()    {
         return Application.dataPath + "/../user_view.png";
     }
-    private bool testShotActive = false;
-    private uint testShotHandle = 0;
-
     public void TestScreenshotOnly()    {
         var png = CaptureMirrorToPng();
         if (png != null)
@@ -2177,27 +2172,27 @@ void TakeScreenshotForAgent(string requestId)    {
     // The message schema (type/payload/timestamp/id JSON) lives entirely in the
     // C++ DLL; C# only passes raw values. No JSON is built here. ----
     void AgentSendTtsStop()    {
-        var b = FindObjectOfType<AoiNativeAgent>();
+        var b = FindFirstObjectByType<AoiNativeAgent>();
         if (b != null) b.SendTtsStop();
     }
     void AgentSendStateChange(string state, string mode, string shotPath)    {
-        var b = FindObjectOfType<AoiNativeAgent>();
+        var b = FindFirstObjectByType<AoiNativeAgent>();
         if (b != null) b.SendStateChange(state, mode, shotPath);
     }
     void AgentSendScreenshotPath(string requestId, string path)    {
-        var b = FindObjectOfType<AoiNativeAgent>();
+        var b = FindFirstObjectByType<AoiNativeAgent>();
         if (b != null) b.SendScreenshotPath(requestId, path);
     }
     void AgentSendScreenshotImage(string requestId, string b64)    {
-        var b = FindObjectOfType<AoiNativeAgent>();
+        var b = FindFirstObjectByType<AoiNativeAgent>();
         if (b != null) b.SendScreenshotImage(requestId, b64);
     }
     void AgentSendScreenshotError(string requestId, string error)    {
-        var b = FindObjectOfType<AoiNativeAgent>();
+        var b = FindFirstObjectByType<AoiNativeAgent>();
         if (b != null) b.SendScreenshotError(requestId, error);
     }
     void AgentSendDisplayResult(bool success)    {
-        var b = FindObjectOfType<AoiNativeAgent>();
+        var b = FindFirstObjectByType<AoiNativeAgent>();
         if (b != null) b.SendDisplayResult(success);
     }
     // Inbound messages from the embedded C++ agent (called on the Unity main
@@ -2293,7 +2288,7 @@ void TakeScreenshotForAgent(string requestId)    {
                             if (string.IsNullOrEmpty(vrReqId)) vrReqId = Guid.NewGuid().ToString("N");
                             Log($"[VrSkills] skill={skill}");
                             var vrResult = VrSkills.ApplySkill(skill, payload);
-                            var agent = FindObjectOfType<AoiNativeAgent>();
+                            var agent = FindFirstObjectByType<AoiNativeAgent>();
                             if (agent != null) agent.SendVrSkillResult(vrReqId, vrResult);
                         }
                         break;

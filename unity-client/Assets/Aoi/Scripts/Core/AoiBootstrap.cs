@@ -648,7 +648,7 @@ public class AoiBootstrap : MonoBehaviour
         bindHover.texts = new TextMeshProUGUI[] { bindTxt };
         bindBtnC.onClick.AddListener(() =>
         {
-            var orch = FindObjectOfType<AoiOrchestrator>();
+            var orch = FindFirstObjectByType<AoiOrchestrator>();
             if (orch != null) orch.OpenBindingSettings();
         });
 
@@ -763,7 +763,7 @@ public class AoiBootstrap : MonoBehaviour
         textTMP.alignment = TextAlignmentOptions.TopLeft;
         textTMP.color = TextMain;
         textTMP.font = AoiOrchestrator.ResolveUIFont();
-        textTMP.enableWordWrapping = true;
+        textTMP.textWrappingMode = TextWrappingModes.Normal;
         textTMP.overflowMode = TextOverflowModes.Overflow;
         textTMP.richText = true;
         textTMP.raycastTarget = false;
@@ -902,7 +902,7 @@ public class AoiBootstrap : MonoBehaviour
         subtitleText.alignment = TextAlignmentOptions.BottomLeft;
         subtitleText.color = Amber;
         subtitleText.font = AoiOrchestrator.ResolveUIFont();
-        subtitleText.enableWordWrapping = true;
+        subtitleText.textWrappingMode = TextWrappingModes.Normal;
         subtitleText.overflowMode = TextOverflowModes.Truncate;
         subtitleText.raycastTarget = false;
 
@@ -930,7 +930,7 @@ public class AoiBootstrap : MonoBehaviour
         hintText.alignment = TextAlignmentOptions.Center;
         hintText.color = TextDim;
         hintText.font = AoiOrchestrator.ResolveUIFont();
-        hintText.enableWordWrapping = true;
+        hintText.textWrappingMode = TextWrappingModes.Normal;
         hintText.overflowMode = TextOverflowModes.Overflow;
         hintText.richText = true;
         hintText.raycastTarget = false;
@@ -1050,7 +1050,7 @@ public class AoiBootstrap : MonoBehaviour
         txt.alignment = alignment;
         txt.color = color;
         txt.font = AoiOrchestrator.ResolveUIFont();
-        txt.enableWordWrapping = true;
+        txt.textWrappingMode = TextWrappingModes.Normal;
         txt.overflowMode = TextOverflowModes.Overflow;
         txt.richText = richText;
         txt.raycastTarget = false;

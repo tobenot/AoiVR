@@ -22,7 +22,7 @@ set CMAKE=%VSROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.
 if not exist "%CMAKE%" set CMAKE=cmake
 
 if not exist "%BUILD%\CMakeCache.txt" (
-    "%CMAKE%" -S "%ROOT%" -B "%BUILD%" -G "Visual Studio 18 2026" -A x64
+    "%CMAKE%" -S "%ROOT%" -B "%BUILD%" -G "Visual Studio 17 2022" -A x64
     if errorlevel 1 ( echo [GATE] configure failed & exit /b 1 )
 )
 "%CMAKE%" --build "%BUILD%" --config Release

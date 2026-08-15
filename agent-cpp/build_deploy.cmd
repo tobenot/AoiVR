@@ -26,7 +26,7 @@ if not exist "%SRC%src\prompts.gen.hpp" (
 )
 
 if not exist "%BUILD%\CMakeCache.txt" (
-    "%CMAKE%" -S "%SRC%" -B "%BUILD%" -G "Visual Studio 18 2026" -A x64 || goto :err
+    "%CMAKE%" -S "%SRC%" -B "%BUILD%" -G "Visual Studio 17 2022" -A x64 || goto :err
 )
 "%CMAKE%" --build "%BUILD%" --config Release --target aoi-agent-dll || goto :err
 

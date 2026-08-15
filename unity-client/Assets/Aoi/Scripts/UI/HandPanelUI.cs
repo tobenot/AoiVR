@@ -259,21 +259,15 @@ public class HandPanelUI : MonoBehaviour
     // Pipeline is ephemeral: shown while the agent is working, then fades out.
     private float procFadeStart = -1f;
     private const float procFadeDuration = 0.5f;
-    // Whether this turn has used a tool ("检索" stage). Kept for the meta
-    // display (procbar only; the in-statusbar pstep dots were removed).
-    private bool procSawRetrieve_ = false;
-
     public void SetProcessingStage(string stage, string thought = null)
     {
         if (procbarText == null) return;
         if (stage == "done")
         {
             procFadeStart = Time.unscaledTime;
-            procSawRetrieve_ = false;
             return;
         }
         ShowProcessing(true);
-        if (stage == "retrieve") procSawRetrieve_ = true;
 
         // thought summary replaces in place (mockup: "▸ 他在问这家店还开不开…")
         procbarText.text = "▸ " + (string.IsNullOrEmpty(thought)
@@ -314,7 +308,6 @@ public class HandPanelUI : MonoBehaviour
     public void ResetProcessing()
     {
         procFadeStart = -1f;
-        procSawRetrieve_ = false;
         ShowProcessing(false);
     }
 

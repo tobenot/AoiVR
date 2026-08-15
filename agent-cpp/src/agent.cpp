@@ -127,7 +127,17 @@ bool AoiAgent::start() {
   sessionConfig_.thinking = fileConfig_.llm.thinking;
   sessionConfig_.reasoningEffort = fileConfig_.llm.reasoningEffort;
   sessionConfig_.apiKey = apiKey_;
-  sessionConfig_.systemPrompt = SYSTEM_PROMPT + prompt::knowledgeBaseSection(fileConfig_.knowledgeBase);
+  // Optional private knowledge base: absolute paths are used as-is; relative
+  // paths resolve against the working directory (where aoi_config.json lives).
+  std::string kbSection;
+  if (!fileConfig_.knowledgeBase.empty()) {
+    std::string kbPath = fileConfig_.knowledgeBase;
+    const bool isAbs = (kbPath.size() >= 2 && kbPath[1] == ':') ||
+                       kbPath[0] == '/' || kbPath[0] == '\\';
+    if (!isAbs) kbPath = workDir_ + "/" + kbPath;
+    kbSection = prompt::knowledgeBaseSection(kbPath);
+  }
+  sessionConfig_.systemPrompt = SYSTEM_PROMPT + kbSection;
 
   // Tools
   sessionConfig_.tools.push_back(makeReadTool());

@@ -74,6 +74,15 @@ inline std::string knowledgeBaseSection(const std::string& kbPath) {
   std::string line;
   bool any = false;
   while (std::getline(f, line)) {
+    // Strip a UTF-8 BOM once (first line of the file).
+    if (line.size() >= 3 && line.compare(0, 3, "\xEF\xBB\xBF") == 0) {
+      line.erase(0, 3);
+    }
+    // Skip blank lines and '#' comment lines BEFORE splitting, so a comment
+    // containing '|' is never parsed as a term.
+    const size_t first = line.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) continue;
+    if (line[first] == '#') continue;
     std::string cols[4];
     size_t start = 0;
     for (int i = 0; i < 3; ++i) {
@@ -88,15 +97,10 @@ inline std::string knowledgeBaseSection(const std::string& kbPath) {
     }
     cols[3] = line.substr(start);  // explanation column: rest of the line
     for (auto& c : cols) c = trim(c);
-    if (cols[3].empty() || cols[3][0] == '#') continue;  // comment / no explanation
+    if (cols[3].empty()) continue;  // no explanation
     std::string head = !cols[0].empty() ? cols[0]
                         : (!cols[1].empty() ? cols[1] : cols[2]);
     if (head.empty()) continue;
-    // Drop a UTF-8 BOM if present on the first parsed term.
-    if (!any && head.size() >= 3 && head.compare(0, 3, "\xEF\xBB\xBF") == 0) {
-      head.erase(0, 3);
-      if (head.empty()) continue;
-    }
     section += "- " + head + ": " + cols[3];
     if (!cols[1].empty() && cols[1] != head) {
       section += " (English: " + cols[1] + ")";

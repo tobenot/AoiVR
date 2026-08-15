@@ -7,7 +7,7 @@ name: cpp-gate
 
 on:
   push:
-    branches: [c++]
+    branches: [main, c++]
     paths: ['agent-cpp/**']
   pull_request:
     paths: ['agent-cpp/**']

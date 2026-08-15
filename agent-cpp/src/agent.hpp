@@ -128,6 +128,12 @@ class AoiAgent {
   bool sawAnyTextDelta_ = false;
   bool finalSent_ = false;
   bool busy_ = false;
+  // [PRONUNCIATION] block state (fork feature): while active, TTS output is
+  // buffered instead of streamed, and spoken at the end (English sentence only).
+  bool pronBlockActive_ = false;
+  std::string pronBuffer_;
+  void flushPronBlock();  // speak first field of each block line, reset state
+  static std::string stripPronMarkers(const std::string& s);  // display filter
   std::deque<std::string> ttsQueue_;
   std::mutex ttsMutex_;  // guards ttsQueue_/ttsPlaying_/ttsStopRequested_
   std::string lastSpoken_;  // last TTS sentence spoken (dedup guard)

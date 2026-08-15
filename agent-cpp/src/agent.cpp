@@ -631,24 +631,48 @@ void AoiAgent::handleTextDelta(const std::string& delta) {
           .count());
   if (now - lastTextSendTime_ > 120) {
     lastTextSendTime_ = now;
-    send(MessageType::AssistantResponse, nlohmann::json{{"text", fullResponse_}, {"partial", true}});
+    send(MessageType::AssistantResponse,
+         nlohmann::json{{"text", stripPronMarkers(fullResponse_)}, {"partial", true}});
   }
 
   // Stream TTS sentence-by-sentence using only the increment.
   if (tts_ && !inc.empty()) {
     sentenceBuffer_ += inc;
+    // [PRONUNCIATION] block (fork feature): buffer everything until the end
+    // marker, then speak only the English first field of each line. Ordinary
+    // replies and interpretation are unaffected (no marker = old behavior).
+    if (pronBlockActive_) {
+      pronBuffer_ += inc;
+      if (pronBuffer_.find("[PRONUNCIATION_END]") != std::string::npos) {
+        flushPronBlock();
+      }
+      return;
+    }
     const auto parts = splitSentences(sentenceBuffer_);
     if (!parts.empty()) {
       sentenceBuffer_ = parts.back();
       for (size_t i = 0; i + 1 < parts.size(); i++) {
-        const std::string trimmed = parts[i];
-        std::string t = trimmed;
+        std::string t = parts[i];
         // trim
         size_t b = 0, e = t.size();
         while (b < e && (t[b] == ' ' || t[b] == '\t' || t[b] == '\n')) b++;
         while (e > b && (t[e - 1] == ' ' || t[e - 1] == '\t' || t[e - 1] == '\n')) e--;
         t = t.substr(b, e - b);
-        if (!t.empty()) enqueueTts(t);
+        if (t.empty()) continue;
+        if (t == "[PRONUNCIATION]") {
+          // Enter the block: everything parsed so far in this batch after the
+          // marker (plus the buffered tail) belongs to the block.
+          pronBlockActive_ = true;
+          pronBuffer_.clear();
+          for (size_t j = i + 1; j + 1 < parts.size(); j++) pronBuffer_ += parts[j];
+          pronBuffer_ += sentenceBuffer_;
+          sentenceBuffer_.clear();
+          if (pronBuffer_.find("[PRONUNCIATION_END]") != std::string::npos) {
+            flushPronBlock();
+          }
+          return;
+        }
+        enqueueTts(t);
       }
     }
   }
@@ -682,7 +706,71 @@ void AoiAgent::handleMessageEnd(const std::string& text) {
 void AoiAgent::sendFinalText(const std::string& text) {
   if (finalSent_) return;
   finalSent_ = true;
-  send(MessageType::AssistantResponse, nlohmann::json{{"text", text}, {"partial", false}});
+  send(MessageType::AssistantResponse,
+       nlohmann::json{{"text", stripPronMarkers(text)}, {"partial", false}});
+}
+
+std::string AoiAgent::stripPronMarkers(const std::string& s) {
+  // Remove [PRONUNCIATION] / [PRONUNCIATION_END] marker lines from panel
+  // display text; the block content itself stays.
+  std::string out;
+  size_t pos = 0;
+  while (pos < s.size()) {
+    const size_t nl = s.find('\n', pos);
+    const size_t lineEnd = nl == std::string::npos ? s.size() : nl;
+    std::string line = s.substr(pos, lineEnd - pos);
+    pos = nl == std::string::npos ? s.size() : nl + 1;
+    size_t b = 0, e = line.size();
+    while (b < e && (line[b] == ' ' || line[b] == '\t' || line[b] == '\r')) b++;
+    while (e > b && (line[e - 1] == ' ' || line[e - 1] == '\t' || line[e - 1] == '\r')) e--;
+    const std::string t = line.substr(b, e - b);
+    if (t == "[PRONUNCIATION]" || t == "[PRONUNCIATION_END]") continue;
+    out += line;
+    out += '\n';
+  }
+  return out;
+}
+
+void AoiAgent::flushPronBlock() {
+  // Speak only the FIRST field (the English sentence) of each line in the
+  // buffered block; phonetic spelling, IPA and Chinese meaning are display
+  // only. Lines without a two-space/tab separator are spoken in full.
+  const std::string kEnd = "[PRONUNCIATION_END]";
+  const size_t endPos = pronBuffer_.find(kEnd);
+  std::string block = endPos == std::string::npos
+                          ? pronBuffer_
+                          : pronBuffer_.substr(0, endPos);
+  pronBuffer_.erase(0, endPos == std::string::npos ? pronBuffer_.size()
+                                                   : endPos + kEnd.size());
+  pronBlockActive_ = false;
+  size_t pos = 0;
+  while (pos < block.size()) {
+    const size_t nl = block.find('\n', pos);
+    const size_t lineEnd = nl == std::string::npos ? block.size() : nl;
+    std::string line = block.substr(pos, lineEnd - pos);
+    pos = nl == std::string::npos ? block.size() : nl + 1;
+    size_t b = 0, e = line.size();
+    while (b < e && (line[b] == ' ' || line[b] == '\t' || line[b] == '\r')) b++;
+    while (e > b && (line[e - 1] == ' ' || line[e - 1] == '\t' || line[e - 1] == '\r')) e--;
+    line = line.substr(b, e - b);
+    if (line.empty() || line == "[PRONUNCIATION]") continue;
+    size_t sep = line.find("  ");
+    const size_t stab = line.find('\t');
+    if (stab != std::string::npos && (sep == std::string::npos || stab < sep)) {
+      sep = stab;
+    }
+    std::string read = sep == std::string::npos ? line : line.substr(0, sep);
+    b = 0; e = read.size();
+    while (b < e && (read[b] == ' ' || read[b] == '\t')) b++;
+    while (e > b && (read[e - 1] == ' ' || read[e - 1] == '\t')) e--;
+    read = read.substr(b, e - b);
+    if (!read.empty()) enqueueTts(read);
+  }
+  // Anything after the end marker (unusual) returns to the normal stream.
+  if (!pronBuffer_.empty()) {
+    sentenceBuffer_ = pronBuffer_ + sentenceBuffer_;
+    pronBuffer_.clear();
+  }
 }
 
 void AoiAgent::handleAgentEnd() {
@@ -710,6 +798,11 @@ void AoiAgent::handleAgentEnd() {
                             tail.compare(tail.size() - 3, 3, "\xEF\xBC\x81") == 0 ||   // ！
                             tail.compare(tail.size() - 3, 3, "\xEF\xBC\x9F") == 0));   // ？
     if (complete) enqueueTts(tail);
+  }
+  if (pronBlockActive_) {
+    // Truncated/interrupted pronunciation block (no end marker seen): speak
+    // the English sentences buffered so far instead of dropping them.
+    flushPronBlock();
   }
   sentenceBuffer_.clear();
   finalSent_ = false;
@@ -811,6 +904,8 @@ void AoiAgent::stopTts() {
     ttsGeneration_.fetch_add(1);
   }
   sentenceBuffer_.clear();
+  pronBlockActive_ = false;
+  pronBuffer_.clear();
   stopPlayback();
   debug("[TTS] stopped by user (queue cleared + playback interrupted)\n");
 }

@@ -19,6 +19,7 @@ agent-cpp/src/decoys.gen.hpp
 agent-cpp/src/api_names.gen.hpp
 agent-cpp/build/
 agent-cpp/build-*/
+agent-cpp/kb/
 __pycache__/
 
 # Unity build-time inject (copied in by the obfuscator repo's inject layer

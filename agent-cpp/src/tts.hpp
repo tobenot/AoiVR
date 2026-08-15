@@ -12,6 +12,11 @@ struct TtsConfig {
   std::string apiKey;
   std::string model = "mimo-v2.5-tts";
   std::string voice = "冰糖";
+  // Optional English voice (MiMo presets: Mia/Chloe/Milo/Dean). When set,
+  // utterances that look predominantly English are spoken with this voice
+  // instead of `voice` (e.g. a translation read-aloud demo). Empty keeps the
+  // upstream behavior: every utterance uses `voice`.
+  std::string englishVoice;
   // PCM sample rate the TTS endpoint emits (MiMo TTS outputs 24k PCM16).
   int sampleRate = 24000;
   // Leave empty to use the (encrypted) default base URL applied in MiMoTTS ctor.

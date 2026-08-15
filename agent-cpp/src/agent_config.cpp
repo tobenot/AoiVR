@@ -39,7 +39,10 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
   if (!f.is_open()) return cfg;
   nlohmann::json root;
   try {
-    root = nlohmann::json::parse(f);
+    // ignore_comments=true so aoi_config.json may carry "//" comments (the
+    // example file documents optional fields this way). Valid JSON parses
+    // exactly as before.
+    root = nlohmann::json::parse(f, nullptr, true, true);
   } catch (...) {
     return cfg;
   }
@@ -72,7 +75,10 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     cfg.tts.apiKey = get(tts, "apiKey", "");
     cfg.tts.model = get(tts, "model", cfg.tts.model);
     cfg.tts.voice = get(tts, "voice", cfg.tts.voice);
+    // Optional; empty keeps the upstream single-voice behavior.
+    cfg.tts.englishVoice = get(tts, "englishVoice", "");
   }
+  cfg.knowledgeBase = get(root, "knowledgeBase", "");
   return cfg;
 }
 

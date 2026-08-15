@@ -1,5 +1,6 @@
 #pragma once
 // Plaintext system prompts (open-source build; source of truth below).
+#include <fstream>
 #include <string>
 namespace aoi {
 namespace prompt {
@@ -38,8 +39,56 @@ IMPORTANT - simultaneous interpretation rules:
 - The translation text will be shown on the user's hand panel by the system; you do not need to echo it.
 - When starting interpretation, reply with a short confirmation only. When stopping, reply with a short confirmation.
 
+Pronunciation aid rules (双显格式, automatic):
+- Whenever you output English text the user will read or speak aloud — especially when translating into English, or when the user asks how to say something ("这句话怎么读", "标谐音", "怎么发音", "how do I say this") — AUTOMATICALLY include a pronunciation guide with it. Do not wait for the user to ask; the guide is expected on every English output.
+- Output one line per sentence or word: the original English text, then a phonetic spelling, then the broad IPA, separated by two spaces or a tab: 英文原句  谐音  IPA.
+- 谐音 (phonetic spelling) splits the word into English syllables that approximate the real pronunciation, so the user can read it aloud as English. Examples: rendezvous -> ron-day-voo, conference -> kon-fer-ence, entrepreneur -> on-truh-pruh-nur. Never use Chinese homophone characters for the phonetic spelling, because the user will read it in English.
+- IPA is a broad phonemic transcription in slashes, e.g. /ˈrɒn.deɪ.vuː/, /ˈkɒn.fər.əns/.
+- Ordinary replies in Chinese (or other non-English conversation) stay plain: no guide needed when no English text is being produced for the user to read.
+- Keep it plain spoken text: no markdown, no emoji, no bullet lists.
+
 Keep responses concise and natural. You speak the same language the user uses.
 )AoiPrompt";
+}
+
+// Optional private knowledge base injection (fork feature, upstream-friendly).
+// Reads a UTF-8 file where each line is "term | short explanation" (pipe
+// separated). Returns the prompt section to append, or an empty string when
+// the path is empty or the file is missing/empty, so default behavior stays
+// identical to upstream. The content only enriches the system prompt; it is
+// never persisted anywhere else.
+inline std::string knowledgeBaseSection(const std::string& kbPath) {
+  if (kbPath.empty()) return "";
+  std::ifstream f(kbPath);
+  if (!f.is_open()) return "";
+  std::string section =
+      "\nMeeting knowledge base (private terms the user provided):\n";
+  std::string line;
+  bool any = false;
+  while (std::getline(f, line)) {
+    const size_t sep = line.find('|');
+    if (sep == std::string::npos) continue;
+    std::string term = line.substr(0, sep);
+    std::string def = line.substr(sep + 1);
+    // Trim surrounding whitespace (also strips \r from CRLF line endings).
+    const auto trim = [](std::string s) {
+      const size_t b = s.find_first_not_of(" \t\r\n");
+      if (b == std::string::npos) return std::string();
+      const size_t e = s.find_last_not_of(" \t\r\n");
+      return s.substr(b, e - b + 1);
+    };
+    term = trim(term);
+    def = trim(def);
+    if (term.empty() || def.empty()) continue;
+    // Drop a UTF-8 BOM if present on the first parsed term.
+    if (!any && term.size() >= 3 && term.compare(0, 3, "\xEF\xBB\xBF") == 0) {
+      term.erase(0, 3);
+      if (term.empty()) continue;
+    }
+    section += "- " + term + ": " + def + "\n";
+    any = true;
+  }
+  return any ? section : "";
 }
 
 inline std::string TRANSLATORPrompt() {

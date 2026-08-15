@@ -1,4 +1,7 @@
 {
+  // knowledgeBase: 私人知识库路径，内容不入库（可选；留空 = 不注入）。
+  // UTF-8 文件，每行 "词 | 简短解释"（竖线分隔）；文件存在且非空时注入 system prompt。
+  "knowledgeBase": "",
   "llm": {
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "apiKey": "",

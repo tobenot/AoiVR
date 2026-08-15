@@ -8,7 +8,26 @@ namespace aoi {
 
 namespace {
 const std::string kDefaultBaseUrl = "https://api.xiaomimimo.com/v1";
+
+// Rough "predominantly English" check used to pick the English TTS voice.
+// The utterance counts as English when ASCII letters clearly outnumber CJK
+// characters (same rough CJK lead-byte test as the interpreter's language
+// check). Texts with no ASCII letters (pure Chinese, punctuation-only) fall
+// through to the default voice.
+bool looksEnglish(const std::string& s) {
+  size_t asciiLetters = 0;
+  size_t cjk = 0;
+  for (size_t i = 0; i < s.size(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+      ++asciiLetters;
+    } else if (c >= 0xE4 && c <= 0xE9) {
+      ++cjk;  // rough CJK lead byte (3-byte UTF-8)
+    }
+  }
+  return asciiLetters > 0 && asciiLetters > cjk * 2;
 }
+} // namespace
 
 MiMoTTS::MiMoTTS(TtsConfig config) : config_(std::move(config)) {
   // Apply the (encrypted) default base URL when none was provided.
@@ -31,7 +50,15 @@ bool MiMoTTS::speak(const std::string& text, const std::string& style,
   nlohmann::json body;
   body["model"] = config_.model;
   body["messages"] = messages;
-  body["audio"] = {{"format", "pcm16"}, {"voice", config_.voice}};
+  // Pick the voice for this utterance: when an English voice is configured
+  // and the text is predominantly English, use it (e.g. a translation
+  // read-aloud demo); otherwise fall back to the default voice. Empty
+  // englishVoice keeps the upstream single-voice behavior.
+  std::string voice = config_.voice;
+  if (!config_.englishVoice.empty() && looksEnglish(text)) {
+    voice = config_.englishVoice;
+  }
+  body["audio"] = {{"format", "pcm16"}, {"voice", voice}};
   body["stream"] = true;
 
   const std::string url = config_.baseUrl + "/chat/completions";

@@ -21,6 +21,9 @@ struct TtsSettings {
   std::string apiKey;
   std::string model;
   std::string voice;
+  // Optional English voice (e.g. "Mia"); empty disables per-language voice
+  // selection and keeps the upstream single-voice behavior.
+  std::string englishVoice;
 };
 
 // Runtime configuration loaded from aoi_config.json next to the executable.
@@ -30,6 +33,11 @@ struct TtsSettings {
 struct AgentFileConfig {
   LlmConfig llm;
   TtsSettings tts;
+  // Optional path to a private knowledge base file (UTF-8, one
+  // "term | explanation" per line, pipe separated). Injected into the system
+  // prompt when the file exists and is non-empty; empty = feature off.
+  // Default behavior (no file) is identical to upstream.
+  std::string knowledgeBase;
 };
 
 // Load aoi_config.json from `workDir`. Missing file / unparsable JSON / missing

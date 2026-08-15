@@ -113,6 +113,7 @@ bool AoiAgent::start() {
     TtsConfig tc;
     tc.apiKey = fileConfig_.tts.apiKey;
     tc.voice = fileConfig_.tts.voice;
+    tc.englishVoice = fileConfig_.tts.englishVoice;
     tc.model = fileConfig_.tts.model;
     tc.baseUrl = fileConfig_.tts.baseUrl;
     tts_ = std::make_unique<MiMoTTS>(tc);
@@ -126,7 +127,7 @@ bool AoiAgent::start() {
   sessionConfig_.thinking = fileConfig_.llm.thinking;
   sessionConfig_.reasoningEffort = fileConfig_.llm.reasoningEffort;
   sessionConfig_.apiKey = apiKey_;
-  sessionConfig_.systemPrompt = SYSTEM_PROMPT;
+  sessionConfig_.systemPrompt = SYSTEM_PROMPT + prompt::knowledgeBaseSection(fileConfig_.knowledgeBase);
 
   // Tools
   sessionConfig_.tools.push_back(makeReadTool());

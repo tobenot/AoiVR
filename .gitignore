@@ -51,3 +51,8 @@ build_log*.txt
 # Build-generated (see README build steps)
 unity-client/Assets/Aoi/Plugins/x86_64/aoi_agent.dll
 unity-client/Assets/AoiMain.unity
+
+# Local launcher shims pointing at unity-client/Build (ignored)
+/demo.bat
+/vr.bat
+unity-client/ProjectSettings/PackageManagerSettings.asset

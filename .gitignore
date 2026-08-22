@@ -56,3 +56,8 @@ unity-client/Assets/AoiMain.unity
 /demo.bat
 /vr.bat
 unity-client/ProjectSettings/PackageManagerSettings.asset
+
+# Local-only: keyed config backup, private KB, handover docs, build pipeline
+/backup/
+/docs/
+/pipeline.cmd

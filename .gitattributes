@@ -1,0 +1,46 @@
+# Normalize line endings: repo stores LF except Windows scripts.
+* text=auto
+
+# --- Unity YAML assets -------------------------------------------------
+# Unity always writes these as LF. Pinning eol=lf prevents the endless
+# "modified" flip-flop between Unity rewrites and core.autocrlf on Windows.
+*.meta      text eol=lf
+*.asset     text eol=lf
+*.unity     text eol=lf
+*.mat       text eol=lf
+*.prefab    text eol=lf
+*.controller text eol=lf
+*.anim      text eol=lf
+*.shader    text eol=lf
+*.asmdef    text eol=lf
+*.inputactions text eol=lf
+
+# --- Windows scripts ---------------------------------------------------
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# --- Unix scripts ------------------------------------------------------
+*.sh        text eol=lf
+*.pl        text eol=lf
+*.pm        text eol=lf
+
+# --- Binaries ----------------------------------------------------------
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.ttf       binary
+*.otf       binary
+*.woff      binary
+*.woff2     binary
+*.dll       binary
+*.exe       binary
+*.lib       binary
+*.pdb       binary
+*.pdf       binary
+*.wav       binary
+*.mp3       binary
+*.ogg       binary
+*.unitypackage binary

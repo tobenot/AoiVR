@@ -61,6 +61,15 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     } else if (e == "low" || e == "medium" || e == "high") {
       cfg.llm.reasoningEffort = e;
     }
+    // nativeAudio: bool (or "false"/"0"/"off" string, mirroring tts.enabled).
+    if (llm.contains("nativeAudio")) {
+      const auto& v = llm["nativeAudio"];
+      if (v.is_boolean()) cfg.llm.nativeAudio = v.get<bool>();
+      else if (v.is_string()) {
+        const std::string s = v.get<std::string>();
+        cfg.llm.nativeAudio = !(s == "false" || s == "0" || s == "off");
+      }
+    }
   }
   if (root.is_object() && root.contains("tts") && root["tts"].is_object()) {
     const auto& tts = root["tts"];

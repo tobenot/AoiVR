@@ -7,7 +7,14 @@
     "apiKey": "",
     "model": "mimo-v2.5",
     "thinking": "disabled",
-    "reasoningEffort": "low"
+    "reasoningEffort": "low",
+    // nativeAudio: 是否把你的原始语音直接发给大模型"亲耳听"。
+    //   false（默认）= 语音在本地转写成文字后只发文字。任何 OpenAI 兼容端点都能用
+    //                （opencode zen/go 不支持音频输入，保持 false 即可）。
+    //   true         = 原始语音作为 input_audio 内容块发送（保留语气/情绪，
+    //                  仅支持音频输入的端点可用，如 MiMo API 直连）。
+    // 若端点返回 400 且报错提到 input_audio，会自动降级为本地转写并记入日志。
+    "nativeAudio": false
   },
   "tts": {
     "enabled": true,

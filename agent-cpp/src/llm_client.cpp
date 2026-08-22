@@ -8,6 +8,7 @@
 #include <random>
 
 #include "base64.hpp"
+#include "sherpa_asr.hpp"
 
 namespace aoi {
 
@@ -46,6 +47,69 @@ std::string extractProviderErrorMessage(const std::string& body) {
     msg += "…";
   }
   return msg;
+}
+
+// Decode a "data:audio/...;base64,..." data URL into 16kHz mono float PCM
+// suitable for sherpaTranscribeFull. Returns false when the payload is not a
+// WAV we understand (the caller keeps the audio part untouched in that case —
+// sending it natively is still better than dropping the user's words).
+bool decodeWavDataUrl(const std::string& dataUrl, std::vector<float>& out) {
+  static const std::string kMarker = ";base64,";
+  const size_t markerPos = dataUrl.find(kMarker);
+  if (markerPos == std::string::npos) return false;
+  // Only WAV: the mic path always produces data:audio/wav;base64.
+  if (dataUrl.rfind("data:audio/wav", 0) != 0) return false;
+  const std::string b64 = dataUrl.substr(markerPos + kMarker.size());
+  std::vector<uint8_t> bytes;
+  bytes.reserve(b64.size() / 4 * 3);
+  int32_t val = 0;
+  int bits = 0;
+  for (const char c : b64) {
+    if (c == '=' || c == ' ' || c == '\t') continue;
+    int32_t d;
+    if (c >= 'A' && c <= 'Z') d = c - 'A';
+    else if (c >= 'a' && c <= 'z') d = c - 'a' + 26;
+    else if (c >= '0' && c <= '9') d = c - '0' + 52;
+    else if (c == '+') d = 62;
+    else if (c == '/') d = 63;
+    else continue;
+    val = (val << 6) | d;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
+    }
+  }
+  // Parse the 44-byte canonical WAV header written by MicCapture: skip it,
+  // treat the rest as little-endian signed 16-bit mono PCM.
+  constexpr size_t kHeaderBytes = 44;
+  if (bytes.size() <= kHeaderBytes || bytes.size() % 2 != 0) return false;
+  out.clear();
+  out.reserve((bytes.size() - kHeaderBytes) / 2);
+  for (size_t i = kHeaderBytes; i + 1 < bytes.size(); i += 2) {
+    const int16_t s = static_cast<int16_t>(bytes[i] | (bytes[i + 1] << 8));
+    out.push_back(static_cast<float>(s) / 32768.0f);
+  }
+  return !out.empty();
+}
+
+// Replace every audio part with its local transcript as a text part. Used
+// when nativeAudio is off or the endpoint has rejected input_audio.
+void foldAudioToTranscript(std::vector<ContentPart>& parts) {
+  for (auto& p : parts) {
+    if (p.type != "audio") continue;
+    std::vector<float> pcm;
+    SherpaResult r;
+    if (decodeWavDataUrl(p.dataUrl, pcm)) {
+      r = sherpaTranscribeFull(pcm);
+    }
+    ContentPart tp;
+    tp.type = "text";
+    tp.text = r.text.empty()
+        ? "（语音转写失败，无法识别这段话的内容）"
+        : ("用户说了（本地语音转写）：" + r.text);
+    p = std::move(tp);
+  }
 }
 
 } // namespace
@@ -410,6 +474,15 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
         ? ("HTTP status " + std::to_string(res.status))
         : ("HTTP " + std::to_string(res.status) + ": " + detail);
     log("[LLM] error detail: " + lastErrorDetail_);
+    // Auto-fallback: endpoint rejected native audio. Flip the sticky flag so
+    // every later request (including the retry of this turn) transcribes
+    // locally instead of sending input_audio blocks.
+    if (res.status == 400 &&
+        (rawBody.find("input_audio") != std::string::npos ||
+         detail.find("input_audio") != std::string::npos)) {
+      nativeAudioRejected_.store(true);
+      log("[LLM] endpoint does not support input_audio; falling back to local transcription");
+    }
     return false;
   }
 
@@ -620,21 +693,36 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
   // no trimming: the prefix stays stable for provider KV-cache hits.
   std::vector<ContentPart> audioParts;
   std::vector<ContentPart> imageParts;
-  for (const auto& p : parts) {
-    if (p.type == "audio") audioParts.push_back(p);
-    else imageParts.push_back(p);
+  std::string transcriptPrefix;
+  if (!config_.nativeAudio || nativeAudioRejected_.load()) {
+    std::vector<ContentPart> folded = parts;
+    foldAudioToTranscript(folded);
+    for (const auto& p : folded) {
+      if (p.type == "audio") audioParts.push_back(p);        // undecodable, kept natively
+      else if (p.type == "image_url") imageParts.push_back(p);
+      else if (!p.text.empty()) transcriptPrefix += p.text + "\n";
+    }
+  } else {
+    for (const auto& p : parts) {
+      if (p.type == "audio") audioParts.push_back(p);
+      else imageParts.push_back(p);
+    }
   }
 
   // Persistent user message: text + audio + images (all co-located so the
-  // model treats them as one user turn).
+  // model treats them as one user turn). When audio was folded to a local
+  // transcript, the transcript rides at the FRONT of the message text so the
+  // model reads "用户说了（本地语音转写）：…\n<original instruction text>".
+  const std::string effectiveText = transcriptPrefix.empty()
+      ? text : (transcriptPrefix + text);
   ChatMessage user;
   user.role = "user";
   if (imageParts.empty() && audioParts.empty()) {
-    user.content = text;
+    user.content = effectiveText;
   } else {
     ContentPart tp;
     tp.type = "text";
-    tp.text = text;
+    tp.text = effectiveText;
     user.parts.push_back(tp);
     for (auto& ip : imageParts) user.parts.push_back(ip);
     for (auto& ap : audioParts) user.parts.push_back(ap);

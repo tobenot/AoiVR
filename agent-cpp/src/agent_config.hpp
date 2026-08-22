@@ -12,6 +12,14 @@ struct LlmConfig {
   std::string thinking = "auto";
   // Optional "low" | "medium" | "high" -> "reasoning_effort" on the wire.
   std::string reasoningEffort;
+  // When true, the user's voice is sent to the model as a native input_audio
+  // content block (the model "hears" tone/emphasis; requires an endpoint that
+  // supports OpenAI input_audio, e.g. MiMo direct). When false (default), the
+  // voice is transcribed locally (sherpa-onnx, same engine as interpretation)
+  // and ONLY the transcript is sent — works on every OpenAI-compatible
+  // endpoint. A HTTP 400 that looks like an input_audio rejection auto-falls
+  // back to the transcript either way (see llm_client.cpp).
+  bool nativeAudio = false;
 };
 
 // TTS settings (aoi_config.json -> "tts").

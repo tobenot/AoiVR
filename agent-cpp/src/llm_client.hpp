@@ -93,6 +93,13 @@ class LlmSession {
     // Optional reasoning effort ("low" | "medium" | "high", MiMo accepts all
     // three alongside thinking.type). Empty = not sent (provider default).
     std::string reasoningEffort;
+    // When false (default), incoming audio parts are transcribed locally
+    // (sherpa-onnx) and replaced by their transcript before the request is
+    // built — every OpenAI-compatible endpoint works. When true, audio is
+    // sent natively as input_audio blocks; if the endpoint rejects them with
+    // a 400 mentioning input_audio, the next turn auto-falls back to local
+    // transcription for the rest of the session.
+    bool nativeAudio = false;
   };
 
   explicit LlmSession(Config config);
@@ -179,6 +186,11 @@ void trimHistoryToMax(size_t max);
   // error message, or transport error). Set by runTurn, shown to the user in
   // the failure finalText so the panel never just says "network error".
   std::string lastErrorDetail_;
+
+  // Sticky fallback: set when a 400 error body mentions input_audio (endpoint
+  // does not support native audio). From then on buildRequest transcribes all
+  // audio parts locally instead of sending them on the wire.
+  std::atomic<bool> nativeAudioRejected_{false};
 };
 
 } // namespace aoi

@@ -126,7 +126,9 @@ bool AoiAgent::start() {
   sessionConfig_.modelId = fileConfig_.llm.model;
   sessionConfig_.thinking = fileConfig_.llm.thinking;
   sessionConfig_.reasoningEffort = fileConfig_.llm.reasoningEffort;
+  sessionConfig_.nativeAudio = fileConfig_.llm.nativeAudio;
   sessionConfig_.apiKey = apiKey_;
+  debug("[Agent] nativeAudio=%s\n", fileConfig_.llm.nativeAudio ? "on" : "off (local ASR)");
   // Optional private knowledge base: absolute paths are used as-is; relative
   // paths resolve against the working directory (where aoi_config.json lives).
   std::string kbSection;

@@ -11,6 +11,45 @@
 
 namespace aoi {
 
+namespace {
+
+// Pull a human-readable error message out of a provider error body. Tries, in
+// order: {"error":{"message":...}} (OpenAI style), {"error": "<str>"},
+// {"message": ...}. Returns "" when nothing usable is found. The result is
+// capped so a giant HTML error page can't flood the wrist panel.
+std::string extractProviderErrorMessage(const std::string& body) {
+  std::string msg;
+  try {
+    auto json = nlohmann::json::parse(body);
+    if (json.is_object()) {
+      if (json.contains("error")) {
+        const auto& err = json["error"];
+        if (err.is_object() && err.contains("message") && err["message"].is_string())
+          msg = err["message"].get<std::string>();
+        else if (err.is_string())
+          msg = err.get<std::string>();
+      }
+      if (msg.empty() && json.contains("message") && json["message"].is_string())
+        msg = json["message"].get<std::string>();
+    }
+  } catch (...) {
+    // Not JSON (HTML error page / plain text): fall through to raw snippet.
+  }
+  if (msg.empty()) {
+    // Raw fallback: first line of the body.
+    const size_t nl = body.find('\n');
+    msg = body.substr(0, nl == std::string::npos ? body.size() : nl);
+  }
+  constexpr size_t kMax = 300;
+  if (msg.size() > kMax) {
+    msg.resize(kMax);
+    msg += "…";
+  }
+  return msg;
+}
+
+} // namespace
+
 // ---- LlmSession ----
 
 LlmSession::LlmSession(Config config) : config_(std::move(config)) {}
@@ -357,6 +396,20 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
       const size_t n = rawBody.size() < 600 ? rawBody.size() : 600;
       log("[LLM] response head: " + rawBody.substr(0, n));
     }
+    // Surface the real cause to the UI: prefer the provider's JSON error
+    // message ("error.message" / "message"), then the transport detail, then
+    // just the status code. Kept SHORT — this rides along in finalText and
+    // must stay readable on the wrist panel.
+    std::string detail;
+    if (!rawBody.empty()) detail = extractProviderErrorMessage(rawBody);
+    if (detail.empty() && !res.transportError.empty()) {
+      detail = res.transportError;
+      if (res.osError > 0) detail += " (os errno " + std::to_string(res.osError) + ")";
+    }
+    lastErrorDetail_ = detail.empty()
+        ? ("HTTP status " + std::to_string(res.status))
+        : ("HTTP " + std::to_string(res.status) + ": " + detail);
+    log("[LLM] error detail: " + lastErrorDetail_);
     return false;
   }
 
@@ -635,10 +688,14 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
     const bool ok = runTurn(*turnHistory, toolCalls, textOut, &truncated, &reasoningOut);
     if (!ok) {
       // Deliver a final (error) message so the UI never stays stuck on
-      // "正在发送...". If we got partial text, use it; otherwise a clear note.
+      // "正在发送...". If we got partial text, use it; otherwise show the real
+      // cause (HTTP status + provider message / transport error) so the wrist
+      // panel says WHY it failed instead of a generic network line.
       SessionEvent ev;
       ev.type = "message_end";
-      ev.finalText = textOut.empty() ? "（网络异常，未能获取回复，请重试）" : textOut;
+      ev.finalText = textOut.empty()
+          ? ("（网络异常，未能获取回复。" + lastErrorDetail_ + "）")
+          : textOut;
       emit(ev);
       SessionEvent end;
       end.type = "agent_end";

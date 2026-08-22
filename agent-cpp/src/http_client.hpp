@@ -35,6 +35,11 @@ class HttpClient {
   struct Result {
     long status = 0;
     std::string body;  // only populated when onData is not provided
+    // Transport-level failure detail: the curl error string (CURLE_* code +
+    // human message, e.g. "Couldn't resolve host 'api.x.com'"). Empty when
+    // the transfer itself succeeded (any HTTP status, even 4xx/5xx).
+    std::string transportError;
+    long osError = 0;  // CURLINFO_OS_ERRNO snapshot (0 when unknown)
   };
 
   // POST with streaming response. headers includes "Content-Type: ..." etc.

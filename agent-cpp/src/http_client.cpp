@@ -117,6 +117,17 @@ HttpClient::Result HttpClient::postStream(const std::string& url,
     result.status = -1;
   } else {
     result.status = static_cast<long>(status > 0 ? status : (res == CURLE_OK ? 0 : -1000));
+    // Transport failure (DNS, TCP connect, TLS handshake, timeout, reset...):
+    // capture curl's error string + the raw OS errno so callers can surface a
+    // real diagnosis instead of a generic "network error". HTTP-level failures
+    // (4xx/5xx) leave transportError empty — the body carries that story.
+    if (res != CURLE_OK) {
+      const char* errStr = curl_easy_strerror(res);
+      result.transportError = errStr ? errStr : "unknown curl error";
+      long osErr = 0;
+      curl_easy_getinfo(curl, CURLINFO_OS_ERRNO, &osErr);
+      result.osError = osErr;
+    }
   }
   result.body = std::move(ctx.body);
 

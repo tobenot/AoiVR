@@ -174,6 +174,11 @@ void trimHistoryToMax(size_t max);
   size_t lastCachedTokens_ = 0;
   size_t lastReasoningTokens_ = 0;
   bool sawUsage_ = false;
+
+  // Human-readable cause of the last failed request (HTTP status + provider
+  // error message, or transport error). Set by runTurn, shown to the user in
+  // the failure finalText so the panel never just says "network error".
+  std::string lastErrorDetail_;
 };
 
 } // namespace aoi

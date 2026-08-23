@@ -19,7 +19,7 @@ struct LlmConfig {
   // and ONLY the transcript is sent — works on every OpenAI-compatible
   // endpoint. A HTTP 400 that looks like an input_audio rejection auto-falls
   // back to the transcript either way (see llm_client.cpp).
-  bool nativeAudio = false;
+  bool nativeAudio = true;
 };
 
 // TTS settings (aoi_config.json -> "tts").

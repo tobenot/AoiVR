@@ -9,12 +9,14 @@
     "thinking": "disabled",
     "reasoningEffort": "low",
     // nativeAudio: 是否把你的原始语音直接发给大模型"亲耳听"。
-    //   false（默认）= 语音在本地转写成文字后只发文字。任何 OpenAI 兼容端点都能用
-    //                （opencode zen/go 不支持音频输入，保持 false 即可）。
-    //   true         = 原始语音作为 input_audio 内容块发送（保留语气/情绪，
-    //                  仅支持音频输入的端点可用，如 MiMo API 直连）。
-    // 若端点返回 400 且报错提到 input_audio，会自动降级为本地转写并记入日志。
-    "nativeAudio": false
+    //   true（默认）= 原始语音作为 input_audio 内容块发送（保留语气/情绪，
+    //                与上游行为一致）。需要支持音频输入的端点，
+    //                如 MiMo API 直连 https://api.xiaomimimo.com/v1 + mimo-v2.5。
+    //   false       = 语音在本地转写成文字后只发文字。任何 OpenAI 兼容端点都能用
+    //                （opencode zen/go 不支持音频输入，用它请改 false）。
+    // 若端点返回 400 且报错提到 input_audio，会自动降级为本地转写并记入日志
+    // （注意：未启用 sherpa 的构建里本地转写不可用，此时语音将无法识别）。
+    "nativeAudio": true
   },
   "tts": {
     "enabled": true,

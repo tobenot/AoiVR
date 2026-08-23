@@ -99,7 +99,7 @@ class LlmSession {
     // sent natively as input_audio blocks; if the endpoint rejects them with
     // a 400 mentioning input_audio, the next turn auto-falls back to local
     // transcription for the rest of the session.
-    bool nativeAudio = false;
+    bool nativeAudio = true;
   };
 
   explicit LlmSession(Config config);

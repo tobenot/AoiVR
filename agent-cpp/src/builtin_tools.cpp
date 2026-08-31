@@ -57,8 +57,10 @@ ToolDefinition makeReadTool() {
     if (path.empty())
       return nlohmann::json{{"content", "(read: missing required parameter 'path' - call the tool again with the file path you want to read)"}};
     auto op = nlohmann::json{{"op", "read"}, {"path", path}};
-    if (args.contains("offset")) op["offset"] = args.value("offset", 0);
-    if (args.contains("max_bytes")) op["max_bytes"] = args.value("max_bytes", 60000);
+    // value(key, int) throws type_error when the model sends a string/float;
+    // copy the raw JSON instead so the helper validates it.
+    if (args.contains("offset")) op["offset"] = args["offset"];
+    if (args.contains("max_bytes")) op["max_bytes"] = args["max_bytes"];
     return sandboxToolResult(op.dump());
   };
   return t;

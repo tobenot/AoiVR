@@ -62,7 +62,8 @@ struct ChatMessage {
 // Events mirroring the pi-coding-agent session events used by agent.ts.
 struct SessionEvent {
   std::string type;  // "message_update", "message_end", "tool_execution_start",
-                     // "tool_execution_end", "agent_end", "reasoning_update"
+                     // "tool_execution_end", "agent_end", "reasoning_update",
+                     // "message_reset" (a retry discards streamed partial text)
   // For message_update / reasoning_update:
   std::string delta;
   // For message_end:

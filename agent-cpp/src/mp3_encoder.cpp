@@ -123,7 +123,11 @@ bool encodeMp3(const std::vector<int16_t>& pcm, uint32_t sampleRate,
   // type carries MF_MT_AUDIO_AVG_BYTES_PER_SECOND, which the encoder reads
   // first).
   Microsoft::WRL::ComPtr<IMFMediaType> mp3Type;
-  MFCreateMediaType(&mp3Type);
+  // MFCreateMediaType can fail (out of memory) -> nullptr deref below.
+  if (FAILED(MFCreateMediaType(&mp3Type))) {
+    if (coInit) CoUninitialize();
+    return false;
+  }
   out->CopyAllItems(mp3Type.Get());
   mp3Type->SetUINT32(MF_MT_AVG_BITRATE, 64000);
   mp3Type->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 8000);

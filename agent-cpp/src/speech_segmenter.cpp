@@ -117,20 +117,25 @@ void SpeechSegmenter::handlePcm(const std::vector<uint8_t>& pcm) {
     // slideNextSample_ exceeds the trimmed buffer length (only the first two
     // windows would ever fire).
     const int64_t frontier = slideStartSample_ + static_cast<int64_t>(slidePcm_.size());
-    while (frontier >= slideNextSample_) {
-      // Take the LATEST W samples ending at the current frontier.
-      const int64_t total = static_cast<int64_t>(slidePcm_.size());
-      const int64_t start = total - slideWindowSamples_;
-      const int64_t winStartSample = slideStartSample_ + start;
+    while (slideNextSample_ <= frontier) {
+      // Window k ends exactly at slideNextSample_ (its scheduled cut point),
+      // not at the current buffer tail. When one late/large chunk carries the
+      // frontier past several step boundaries, ending every window at the tail
+      // would emit duplicate audio and never cover the middle positions.
+      const int64_t winEnd = slideNextSample_;
+      int64_t winStart = winEnd - slideWindowSamples_;
+      if (winStart < slideStartSample_) winStart = slideStartSample_;
+      const int64_t s0 = winStart - slideStartSample_;
+      const int64_t s1 = winEnd - slideStartSample_;
       std::vector<uint8_t> pcm16;
-      pcm16.reserve(static_cast<size_t>(slideWindowSamples_) * 2);
-      for (int64_t i = start; i < total; ++i) {
+      pcm16.reserve(static_cast<size_t>(s1 - s0) * 2);
+      for (int64_t i = s0; i < s1; ++i) {
         uint8_t b[2];
         memcpy(b, &slidePcm_[i], 2);
         pcm16.push_back(b[0]);
         pcm16.push_back(b[1]);
       }
-      handleSegment(std::move(pcm16), static_cast<int>(winStartSample));
+      handleSegment(std::move(pcm16), static_cast<int>(winStart));
       slideNextSample_ += slideStepSamples_;
     }
     return;
@@ -272,16 +277,21 @@ void SpeechSegmenter::stop() {
     vad_ = nullptr;
   }
 #endif
-  // Move the threads out under the lock, then join OUTSIDE it: a worker whose
-  // onSegment callback re-enters stop() would otherwise self-join (deadlock).
+  // Move the threads out under the lock, then join OUTSIDE it. If stop() was
+  // called from INSIDE an onSegment callback (i.e. from a worker thread
+  // itself), joining self would deadlock/throw: detach that one instead -
+  // active_ is already false so it exits after the callback returns.
   std::vector<std::thread> local;
   {
     std::lock_guard<std::mutex> lk(workersMutex_);
     local.swap(workers_);
     activeWorkers_ = 0;
   }
+  const auto selfId = std::this_thread::get_id();
   for (auto& t : local) {
-    if (t.joinable()) t.join();
+    if (!t.joinable()) continue;
+    if (t.get_id() == selfId) t.detach();
+    else t.join();
   }
   if (opts_.onState) opts_.onState("stopped", "");
 }
@@ -295,11 +305,23 @@ void SpeechSegmenter::abort() {
     vad_ = nullptr;
   }
 #endif
-  std::lock_guard<std::mutex> lk(workersMutex_);
-  for (auto& t : workers_) {
-    if (t.joinable()) t.join();
+  // Same pattern as stop(): move the threads out under the lock, join
+  // OUTSIDE it. Joining while holding workersMutex_ deadlocks - each worker
+  // takes that mutex to decrement activeWorkers_ before exiting.
+  std::vector<std::thread> local;
+  {
+    std::lock_guard<std::mutex> lk(workersMutex_);
+    local.swap(workers_);
+    activeWorkers_ = 0;
   }
-  workers_.clear();
+  const auto selfId = std::this_thread::get_id();
+  for (auto& t : local) {
+    if (!t.joinable()) continue;
+    // Same self-join guard as stop(): an onSegment callback calling abort()
+    // from a worker thread must not join itself.
+    if (t.get_id() == selfId) t.detach();
+    else t.join();
+  }
 }
 
 } // namespace aoi

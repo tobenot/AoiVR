@@ -27,7 +27,8 @@ int retryAfterMs(const std::vector<std::pair<std::string, std::string>>& headers
     if (rit->first == "retry-after-ms") {
       char* end = nullptr;
       const long ms = std::strtol(rit->second.c_str(), &end, 10);
-      if (end != rit->second.c_str() && *end == '\0' && ms >= 0) return static_cast<int>(ms);
+      if (end != rit->second.c_str() && *end == '\0' && ms >= 0)
+        return static_cast<int>((std::min)(ms, 3600000L));
       break;
     }
   }
@@ -35,12 +36,15 @@ int retryAfterMs(const std::vector<std::pair<std::string, std::string>>& headers
     if (rit->first == "retry-after") {
       char* end = nullptr;
       const long secs = std::strtol(rit->second.c_str(), &end, 10);
+      // Clamp before the *1000: a huge Retry-After would overflow the int
+      // cast (implementation-defined, possibly negative) and defeat the
+      // caller's minimum-delay semantics.
       if (end != rit->second.c_str() && *end == '\0' && secs >= 0)
-        return static_cast<int>(secs * 1000);
+        return static_cast<int>((std::min)(secs, 3600L) * 1000);
       const time_t when = curl_getdate(rit->second.c_str(), nullptr);
       if (when != -1) {
         const long diffSecs = static_cast<long>(when - time(nullptr));
-        return diffSecs > 0 ? static_cast<int>(diffSecs * 1000) : 0;
+        return diffSecs > 0 ? static_cast<int>((std::min)(diffSecs, 3600L) * 1000) : 0;
       }
       break;
     }
@@ -352,6 +356,11 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
   int executorAttempts = 0;
   int streamAttempts = 0;
   int64_t retryWaitedMs = 0;
+  // Whether ANY attempt of this call already streamed text deltas to the host.
+  // A retry regenerates the reply from scratch, so the consumer's accumulated
+  // text must be reset or it would end up with the failed attempt's prefix
+  // duplicated ("AB" + retry "ABCD" -> "ABABCD" on the panel and in TTS).
+  bool emittedTextEver = false;
 
   for (int attempt = 0; ; ++attempt) {
     // Per-attempt state reset.
@@ -424,6 +433,7 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
             const std::string d = delta["content"].get<std::string>();
             outText += d;
             if (d.size()) {
+              emittedTextEver = true;
               SessionEvent ev;
               ev.type = "message_update";
               ev.delta = d;
@@ -569,6 +579,14 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
     }
 
     if (shouldRetry) {
+      if (emittedTextEver) {
+        // Tell the host to discard the partial text streamed by the failed
+        // attempt; the next attempt starts from a clean slate.
+        SessionEvent ev;
+        ev.type = "message_reset";
+        emit(ev);
+        emittedTextEver = false;
+      }
       // Floor the delay: a 0/negative Retry-After would spin a zero-delay
       // hot loop that never consumes the retry budget.
       if (delayMs < 500) delayMs = 500;
@@ -772,6 +790,7 @@ void LlmSession::maybeCompressHistory() {
       std::string got;
       summarizer.subscribe([&](const SessionEvent& e) {
         if (e.type == "message_update") got += e.delta;
+        if (e.type == "message_reset") got.clear();
         if (e.type == "message_end") got = e.finalText.empty() ? got : e.finalText;
       });
       summarizer.prompt("请将以下对话历史压缩为简洁摘要（保留关键事实、用户偏好、任务状态、未完成事项），只输出摘要：\n\n" +

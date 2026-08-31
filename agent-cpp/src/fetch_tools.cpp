@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -37,8 +38,11 @@ std::string saveFullBody(const std::string& body) {
   const std::string dir = exe + "sandbox\\out";
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
-  const std::string rel =
-      "out\\fetch_" + std::to_string(GetTickCount64()) + ".txt";
+  // GetTickCount64 alone collides when two fetches land in the same
+  // millisecond; a process-wide counter keeps the filenames unique.
+  static std::atomic<uint64_t> seq{0};
+  const std::string rel = "out\\fetch_" + std::to_string(GetTickCount64()) +
+                          "_" + std::to_string(seq.fetch_add(1)) + ".txt";
   std::ofstream f(dir + "\\" + rel.substr(4), std::ios::binary | std::ios::trunc);
   if (!f.is_open()) return "";
   f.write(body.data(), static_cast<std::streamsize>(body.size()));

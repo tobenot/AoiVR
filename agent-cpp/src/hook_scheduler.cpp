@@ -34,6 +34,9 @@ bool parseDateTime(const std::string& iso, struct tm* out) {
   out->tm_year -= 1900;
   out->tm_mon -= 1;
   out->tm_isdst = -1;
+  // Normalize so derived fields (tm_yday/tm_wday) are populated; without this
+  // tm_yday stays 0 and day-level comparisons silently rely on tm_year alone.
+  std::mktime(out);
   return true;
 }
 
@@ -341,7 +344,19 @@ nlohmann::json HookScheduler::manage(const nlohmann::json& args) {
   }
   const std::string newStatus = action == "pause" ? "paused" : "active";
   if (action == "pause" || action == "resume") {
-    updateFired(target->id, target->lastFiredAt, "", newStatus);
+    // Status-only UPDATE: reusing updateFired would also clear last_error and
+    // rewrite last_fired_at with the old value round-tripped through string
+    // parsing (and pause diagnostics would be lost).
+    if (db_) {
+      sqlite3_stmt* stmt = nullptr;
+      if (sqlite3_prepare_v2(db_, "UPDATE agent_hooks SET status=? WHERE id=?",
+                             -1, &stmt, nullptr) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, newStatus.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, target->id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
+      }
+    }
     if (logCb_)
       logCb_("(hooks) " + action + " hook id=" + target->id);
     return {{"content", "Hook " + action + "d."}};
@@ -462,8 +477,17 @@ void HookScheduler::collectDueHooks(std::vector<DispatchJob>& jobs) {
 
     std::string reason;
     if (!guardAllowFire(h, &reason)) {
-      if (logCb_)
-        logCb_("(hooks) skipped hook id=" + h.id + " reason=" + reason);
+      // An interval hook blocked by a guard (silent hours / budget) stays
+      // "due" every tick - without throttling this logs the same line once
+      // per second for the whole silent window. Log once per hook per minute.
+      const long long nowMs = static_cast<long long>(nowSecs);
+      auto it = skipLogState_.find(h.id);
+      if (it == skipLogState_.end() || it->second.first != reason ||
+          nowMs - it->second.second >= 60) {
+        if (logCb_)
+          logCb_("(hooks) skipped hook id=" + h.id + " reason=" + reason);
+        skipLogState_[h.id] = {reason, nowMs};
+      }
       continue;
     }
     ++firedToday_;

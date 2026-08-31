@@ -639,6 +639,8 @@ int main(int argc, char** argv) {
       output = runBash(req.value("command", ""));
     } else if (op == "read") {
       const std::string path = req.value("path", "");
+      // value(key, int) throws on string/float; the catch below turns that
+      // into an error reply instead of a crash.
       const size_t offset = static_cast<size_t>(req.value("offset", 0));
       const size_t maxB = static_cast<size_t>(req.value("max_bytes", 60000));
       output = readTextFile(path, offset, maxB);

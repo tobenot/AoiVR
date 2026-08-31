@@ -2,9 +2,11 @@
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "nlohmann/json.hpp"
 
@@ -102,6 +104,8 @@ class HookScheduler {
   bool running_ = false;
   std::string today_;              // YYYY-MM-DD of the current budget window
   int firedToday_ = 0;             // fires within the current budget window
+  // Per-hook throttle state for guard-skip logging (reason -> last log sec).
+  std::map<std::string, std::pair<std::string, long long>> skipLogState_;
   LlmCallback llmCb_;
   NotifyCallback notifyCb_;
   LogCallback logCb_;

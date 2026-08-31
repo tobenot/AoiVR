@@ -61,10 +61,16 @@ void playPcm16(const std::vector<uint8_t>& pcm, int sampleRate) {
   if (pcm.empty()) return;
   auto& p = playback();
 
+  // Serialize the whole stop-old -> take-ownership sequence: two concurrent
+  // playPcm16 calls could both observe active==false and both take ownership
+  // (overlapping devices, mutual interruption via the shared stopping flag).
+  std::unique_lock<std::mutex> own(p.mutex);
   // Interrupt any previous playback and wait for it to finish.
-  stopPlayback();
+  p.stopping = true;
   while (p.active.load()) {
+    own.unlock();
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    own.lock();
   }
 
   p.active = true;
@@ -99,6 +105,9 @@ void playPcm16(const std::vector<uint8_t>& pcm, int sampleRate) {
     p.active = false;
     return;
   }
+  // Another thread may have called stopPlayback() while we initialized the
+  // device; honor it immediately instead of playing the first buffer.
+  own.unlock();
 
   // Block until fully played or a stop is requested.
   while (!p.stopping.load()) {

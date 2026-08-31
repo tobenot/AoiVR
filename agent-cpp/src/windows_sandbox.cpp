@@ -571,7 +571,12 @@ bool createRestrictedToken(HANDLE* outToken) {
   HANDLE logon = nullptr;
   if (!LogonUserW(userW.c_str(), domainW.c_str(), passW.c_str(),
                   LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &logon)) {
+    // Stale/rotated password: mark creds dirty so ensureSandboxCredentials
+    // re-runs the elevated setup (which rotates the password and rewrites
+    // .sandbox-secrets), then retry once with the fresh password. Retrying
+    // with the SAME password could never succeed.
     g_credsReady = false;
+    if (!ensureSandboxCredentials()) return false;
     const std::wstring passW2 = utf8ToWide(g_sandboxPassword);
     if (!LogonUserW(userW.c_str(), domainW.c_str(), passW2.c_str(),
                     LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT,
@@ -725,8 +730,13 @@ std::string sandboxExecuteInner(const std::string& opJson) {
   sa.nLength = sizeof(sa);
   sa.bInheritHandle = TRUE;
   HANDLE inRead = nullptr, inWrite = nullptr, outRead = nullptr, outWrite = nullptr;
-  if (!CreatePipe(&inRead, &inWrite, &sa, 0) ||
-      !CreatePipe(&outRead, &outWrite, &sa, 0)) {
+  if (!CreatePipe(&inRead, &inWrite, &sa, 0) || !CreatePipe(&outRead, &outWrite, &sa, 0)) {
+    // Short-circuit: if the FIRST pipe succeeded but the second failed, its
+    // handles leak (this path repeats on every sandboxed op).
+    if (inRead) CloseHandle(inRead);
+    if (inWrite) CloseHandle(inWrite);
+    if (outRead) CloseHandle(outRead);
+    if (outWrite) CloseHandle(outWrite);
     return R"json({"ok":false,"error":"(sandbox: CreatePipe failed)"})json";
   }
   SetHandleInformation(inWrite, HANDLE_FLAG_INHERIT, 0);
@@ -868,8 +878,8 @@ std::string sandboxExecuteInner(const std::string& opJson) {
   if (job) CloseHandle(job);
 
   if (out.empty()) {
-    return R"json({"ok":false,"error":"(sandbox: helper produced no output")json" +
-           std::string(", exit=") + std::to_string(helperExit) + ")}";
+    return R"json({"ok":false,"error":"(sandbox: helper produced no output, exit=)json" +
+           std::to_string(helperExit) + R"json()})json";
   }
   return out;
 }

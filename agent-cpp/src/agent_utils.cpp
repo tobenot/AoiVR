@@ -52,11 +52,13 @@ std::string sanitizeUtf8(const std::string& s) {
       i += 1;
       continue;
     }
-    size_t need = 1;
-    if (c >= 0xF0) need = 4;
-    else if (c >= 0xE0) need = 3;
-    else if (c >= 0xC0) need = 2;
-    bool valid = i + need <= s.size();
+    // Expected length from the lead byte; 0 marks an invalid lead (lone
+    // continuation byte or F5..FF, which start no legal sequence).
+    size_t need = 0;
+    if (c >= 0xF0 && c <= 0xF4) need = 4;
+    else if (c >= 0xE0 && c <= 0xEF) need = 3;
+    else if (c >= 0xC2 && c <= 0xDF) need = 2;
+    bool valid = need > 0 && i + need <= s.size();
     if (valid) {
       for (size_t k = 1; k < need; ++k) {
         if ((static_cast<unsigned char>(s[i + k]) & 0xC0) != 0x80) {
@@ -66,11 +68,30 @@ std::string sanitizeUtf8(const std::string& s) {
       }
     }
     if (valid) {
+      // RFC 3629 constraints: reject overlong encodings (E0 80..9F,
+      // F0 80..8F), surrogates (ED A0..BF), and code points above U+10FFFF
+      // (F4 90..). C0/C1 were already excluded from `need` above.
+      const unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+      if (need == 3 && ((c == 0xE0 && c1 < 0xA0) || (c == 0xED && c1 >= 0xA0)))
+        valid = false;
+      if (need == 4 && ((c == 0xF0 && c1 < 0x90) || (c == 0xF4 && c1 >= 0x90)))
+        valid = false;
+    }
+    if (valid) {
       out.append(s, i, need);
       i += need;
     } else {
-      out += kReplacement;  // one replacement per bad byte
-      i += 1;
+      // One U+FFFD per maximal invalid subsequence (Unicode recommendation):
+      // the bad lead byte plus whatever continuation bytes belonged to it,
+      // so "E4 B8 FF" yields one replacement for E4 B8 and one for FF.
+      size_t skip = 1;
+      if (need > 0) {
+        while (skip < need && i + skip < s.size() &&
+               (static_cast<unsigned char>(s[i + skip]) & 0xC0) == 0x80)
+          ++skip;
+      }
+      out += kReplacement;
+      i += skip;
     }
   }
   return out;

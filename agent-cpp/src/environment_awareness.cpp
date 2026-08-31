@@ -110,7 +110,13 @@ void EnvironmentAwareness::stop() {
 void EnvironmentAwareness::visualLoop() {
   while (enabled_.load()) {
     processVisualBatch();
-    std::this_thread::sleep_for(std::chrono::seconds(opts_.batchSeconds));
+    // Interruptible wait (same as cleanupLoop): a bare sleep_for would delay
+    // stop()/join() by up to batchSeconds.
+    {
+      std::unique_lock<std::mutex> lk(stopMutex_);
+      stopCv_.wait_for(lk, std::chrono::seconds(opts_.batchSeconds),
+                       [this]() { return !enabled_.load(); });
+    }
   }
 }
 

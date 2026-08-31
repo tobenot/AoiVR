@@ -226,11 +226,19 @@ std::vector<SkillDef> scanSkillsDir(const std::string& root, int maxDepth,
     for (fs::directory_iterator it(ctx.dir, ec), end; it != end && !ec;
          it.increment(ec)) {
       const fs::path p = it->path();
-      if (it->is_directory(ec) && ctx.depth < maxDepth) {
+      // is_directory/is_regular_file write ec on a per-entry failure (no
+      // permission, broken junction); without clearing it the loop condition
+      // would abort and silently skip every remaining entry in this dir.
+      ec.clear();
+      const bool isDir = it->is_directory(ec);
+      ec.clear();
+      const bool isFile = it->is_regular_file(ec);
+      ec.clear();
+      if (isDir && ctx.depth < maxDepth) {
         stack.push_back({p, ctx.depth + 1});
         continue;
       }
-      if (it->is_regular_file(ec) && p.filename() == "SKILL.md") {
+      if (isFile && p.filename() == "SKILL.md") {
         // Bound the file size before reading the whole thing into memory.
         std::error_code sizeEc;
         const uintmax_t size = it->file_size(sizeEc);

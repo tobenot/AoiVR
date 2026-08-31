@@ -102,18 +102,42 @@ void FloatRingBuffer::reset() {
 
 bool wavTo8kMono(const std::vector<uint8_t>& wav, std::vector<uint8_t>& out) {
   if (wav.size() <= 44) return false;
-  const uint32_t rate = static_cast<uint32_t>(wav[24]) |
-                        (static_cast<uint32_t>(wav[25]) << 8) |
-                        (static_cast<uint32_t>(wav[26]) << 16) |
-                        (static_cast<uint32_t>(wav[27]) << 24);
-  const uint16_t ch = static_cast<uint16_t>(wav[22]) |
-                      (static_cast<uint16_t>(wav[23]) << 8);
-  const uint16_t bits = static_cast<uint16_t>(wav[34]) |
-                        (static_cast<uint16_t>(wav[35]) << 8);
-  if (bits != 16 || ch == 0 || ch > 2 || rate == 0) return false;
-  const size_t frames = (wav.size() - 44) / (static_cast<size_t>(ch) * 2);
+  // Walk the RIFF chunk chain instead of assuming a fixed 44-byte header:
+  // the fmt chunk can be 18/40 bytes (WAVE_FORMAT_EXTENSIBLE) and LIST/fact
+  // chunks commonly precede data (Windows-generated WAVs carry LIST).
+  const auto rd16 = [&wav](size_t off) -> uint16_t {
+    return static_cast<uint16_t>(wav[off] | (wav[off + 1] << 8));
+  };
+  const auto rd32 = [&wav](size_t off) -> uint32_t {
+    return static_cast<uint32_t>(wav[off]) | (static_cast<uint32_t>(wav[off + 1]) << 8) |
+           (static_cast<uint32_t>(wav[off + 2]) << 16) |
+           (static_cast<uint32_t>(wav[off + 3]) << 24);
+  };
+  uint32_t rate = 0;
+  uint16_t ch = 0, bits = 0;
+  size_t dataOff = 0, dataLen = 0;
+  size_t off = 12;  // skip "RIFF" + size + "WAVE"
+  while (off + 8 <= wav.size()) {
+    const uint32_t sz = rd32(off + 4);
+    const size_t body = off + 8;
+    if (body + sz > wav.size()) break;
+    if (wav[off] == 'f' && wav[off + 1] == 'm' && wav[off + 2] == 't' &&
+        wav[off + 3] == ' ' && sz >= 16) {
+      ch = rd16(body + 2);
+      rate = rd32(body + 4);
+      bits = rd16(body + 14);
+    } else if (wav[off] == 'd' && wav[off + 1] == 'a' && wav[off + 2] == 't' &&
+               wav[off + 3] == 'a') {
+      dataOff = body;
+      dataLen = sz;
+      break;  // first data chunk is enough
+    }
+    off = body + sz + (sz & 1);  // chunks are word-aligned
+  }
+  if (!dataOff || bits != 16 || ch == 0 || ch > 2 || rate == 0) return false;
+  const size_t frames = dataLen / (static_cast<size_t>(ch) * 2);
   if (frames == 0) return false;
-  const auto* pcm = reinterpret_cast<const int16_t*>(wav.data() + 44);
+  const auto* pcm = reinterpret_cast<const int16_t*>(wav.data() + dataOff);
 
   // 1) Channel conversion (e.g. stereo -> mono, miniaudio mixes channels).
   ma_channel_converter_config ccfg = ma_channel_converter_config_init(

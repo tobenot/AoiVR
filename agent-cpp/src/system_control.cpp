@@ -113,9 +113,9 @@ HRESULT forEachSession(const std::string& filter, Fn fn) {
             BOOL mute = FALSE;
             vol->GetMute(&mute);
             s.muted = mute != FALSE;
-            // Exact, case-sensitive match against the process name returned
-            // by get_volume — the caller already has the precise name.
-            const bool match = want.empty() || s.process == filter;
+            // Case-insensitive match (the tool's contract); `want` is already
+            // lowercased, so lower the process name too.
+            const bool match = want.empty() || lower(s.process) == want;
             if (match && fn(dev, s, vol)) touched = true;
           }
           if (vol) vol->Release();

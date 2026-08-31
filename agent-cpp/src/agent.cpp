@@ -728,6 +728,10 @@ void AoiAgent::stopAndProcess() {
        nlohmann::json{{"stage", "understand"}, {"thought", "正在理解你的问题…"}});
   thinkingText_.clear();
   try {
+    // Same as handleUserInput: reload AGENTS.md / skills every turn so edits
+    // apply to voice turns too (the voice path used to keep a stale prompt
+    // until the next text turn).
+    session_->setSystemPrompt(buildSystemPrompt());
     session_->prompt(promptText, parts);
   } catch (const std::exception& ex) {
     debug("[Agent] SDK prompt error: %s\n", ex.what());
@@ -854,6 +858,14 @@ void AoiAgent::handleSessionEvent(const SessionEvent& e, bool /*isMain*/) {
            nlohmann::json{{"stage", "generate"}, {"thought", "正在生成回复…"}});
     }
     handleTextDelta(e.delta);
+  } else if (e.type == "message_reset") {
+    // The stream broke mid-reply and the SDK is retrying from scratch: discard
+    // the partial text accumulated from the failed attempt or it would be
+    // duplicated ("AB" + retried "ABCD" -> "ABABCD") on the panel. Sentences
+    // already spoken by TTS cannot be taken back; only future accumulation
+    // is reset.
+    fullResponse_.clear();
+    sentenceBuffer_.clear();
   } else if (e.type == "message_end") {
     handleMessageEnd(e.finalText);
   } else if (e.type == "tool_execution_start") {
@@ -990,6 +1002,7 @@ void AoiAgent::enqueueTts(const std::string& text) {
   if (clean.empty()) return;
   if (isTtsJunk(clean)) return;
   debug("[TTS] enqueue len=%zu: %s\n", clean.size(), clean.c_str());
+  int gen = 0;
   {
     std::lock_guard<std::mutex> lk(ttsMutex_);
     // De-dupe: if the same sentence is already queued (or is the one currently
@@ -1009,10 +1022,12 @@ void AoiAgent::enqueueTts(const std::string& text) {
     // permanent silence (the queue never gets a consumer).
     if (ttsPlaying_ && ttsOwnerGen_ == ttsGeneration_.load()) return;
     ttsPlaying_ = true;
-    const int gen = ttsGeneration_.fetch_add(1) + 1;
+    gen = ttsGeneration_.fetch_add(1) + 1;
     ttsOwnerGen_ = gen;
   }
-  const int gen = ttsGeneration_.load();
+  // gen is the value computed under ttsMutex_ above; re-loading here would
+  // race with a concurrent stop/enqueue bumping the counter between the
+  // critical section and the read.
   spawnWorker(std::thread([this, gen]() {
     for (;;) {
       std::string next;
@@ -1443,6 +1458,7 @@ std::string AoiAgent::promptSubSession(const std::shared_ptr<LlmSession>& sessio
   std::string buf;
   session->subscribe([&buf](const SessionEvent& e) {
     if (e.type == "message_update") buf += e.delta;
+    if (e.type == "message_reset") buf.clear();
     if (e.type == "message_end" && buf.empty()) buf = e.finalText;
   });
   session->prompt(promptText, parts);
@@ -1495,11 +1511,14 @@ bool AoiAgent::startInterpretation(const std::string& targetLang) {
     targetLang_ = targetLang.empty() ? "中文" : targetLang;
   }
   interpActive_ = true;
-  nextSeqToSend_ = 1;
-  ++interpGeneration_;  // invalidate any in-flight translations from a prior session
   {
+    // nextSeqToSend_ is read/written by translation workers under this mutex;
+    // bumping the generation and clearing under the same lock makes the
+    // gen-check + insert in the workers atomic against this reset.
     std::lock_guard<std::mutex> lk(pendingTranslationsMutex_);
+    ++interpGeneration_;  // invalidate any in-flight translations from a prior session
     pendingTranslations_.clear();
+    nextSeqToSend_ = 1;
   }
   lastSegStartSample_ = -1;
   lastSegEndSample_ = -1;
@@ -1648,6 +1667,10 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
       *result = out;
       {
         std::lock_guard<std::mutex> lk(pendingTranslationsMutex_);
+        // Re-check under the lock: a concurrent start/stopInterpretation bumps
+        // the generation while holding this mutex, so a session that was
+        // reset between the outer check and here cannot insert stale entries.
+        if (!interpActive_ || gen != interpGeneration_.load()) return;
         pendingTranslations_[seq] = result;
       }
       deliverTranslations();
@@ -1744,6 +1767,9 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
     *result = out;
     {
       std::lock_guard<std::mutex> lk(pendingTranslationsMutex_);
+      // Re-check under the lock against a concurrent session reset (see the
+      // text-translation worker above).
+      if (!interpActive_ || gen != interpGeneration_.load()) return;
       pendingTranslations_[seq] = result;
     }
     deliverTranslations();

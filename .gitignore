@@ -58,6 +58,7 @@ unity-client/Assets/AoiMain.unity
 unity-client/ProjectSettings/PackageManagerSettings.asset
 
 # Local-only: keyed config backup, private KB, handover docs, build pipeline
+# docs/ 公开部分(方案/计划)入库；私密部分集中在 docs/private/ 忽略
 /backup/
-/docs/
+/docs/private/
 /pipeline.cmd

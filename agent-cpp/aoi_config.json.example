@@ -12,11 +12,18 @@
     //   true（默认）= 原始语音作为 input_audio 内容块发送（保留语气/情绪，
     //                与上游行为一致）。需要支持音频输入的端点，
     //                如 MiMo API 直连 https://api.xiaomimimo.com/v1 + mimo-v2.5。
-    //   false       = 语音在本地转写成文字后只发文字。任何 OpenAI 兼容端点都能用
-    //                （opencode zen/go 不支持音频输入，用它请改 false）。
-    // 若端点返回 400 且报错提到 input_audio，会自动降级为本地转写并记入日志
-    // （注意：未启用 sherpa 的构建里本地转写不可用，此时语音将无法识别）。
+    //   false       = 先发给下方 asr 端点转写，再只把文字交给这里的 LLM。
+    //                任何 OpenAI 兼容的纯文本端点都能用（如 opencode zen/go）。
+    // 若端点返回 400 且报错提到 input_audio，后续轮次会自动降级为远程 ASR。
     "nativeAudio": true
+  },
+  // Optional remote ASR stage used when llm.nativeAudio is false, or after a
+  // native-audio endpoint rejects input_audio. If apiKey is empty, the loader
+  // falls back to tts.apiKey first, then llm.apiKey.
+  "asr": {
+    "baseUrl": "https://api.xiaomimimo.com/v1",
+    "apiKey": "",
+    "model": "mimo-v2.5"
   },
   "tts": {
     "enabled": true,

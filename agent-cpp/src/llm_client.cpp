@@ -7,8 +7,7 @@
 #include <fstream>
 #include <random>
 
-#include "base64.hpp"
-#include "sherpa_asr.hpp"
+#include "remote_asr.hpp"
 
 namespace aoi {
 
@@ -49,69 +48,6 @@ std::string extractProviderErrorMessage(const std::string& body) {
   return msg;
 }
 
-// Decode a "data:audio/...;base64,..." data URL into 16kHz mono float PCM
-// suitable for sherpaTranscribeFull. Returns false when the payload is not a
-// WAV we understand (the caller keeps the audio part untouched in that case —
-// sending it natively is still better than dropping the user's words).
-bool decodeWavDataUrl(const std::string& dataUrl, std::vector<float>& out) {
-  static const std::string kMarker = ";base64,";
-  const size_t markerPos = dataUrl.find(kMarker);
-  if (markerPos == std::string::npos) return false;
-  // Only WAV: the mic path always produces data:audio/wav;base64.
-  if (dataUrl.rfind("data:audio/wav", 0) != 0) return false;
-  const std::string b64 = dataUrl.substr(markerPos + kMarker.size());
-  std::vector<uint8_t> bytes;
-  bytes.reserve(b64.size() / 4 * 3);
-  int32_t val = 0;
-  int bits = 0;
-  for (const char c : b64) {
-    if (c == '=' || c == ' ' || c == '\t') continue;
-    int32_t d;
-    if (c >= 'A' && c <= 'Z') d = c - 'A';
-    else if (c >= 'a' && c <= 'z') d = c - 'a' + 26;
-    else if (c >= '0' && c <= '9') d = c - '0' + 52;
-    else if (c == '+') d = 62;
-    else if (c == '/') d = 63;
-    else continue;
-    val = (val << 6) | d;
-    bits += 6;
-    if (bits >= 8) {
-      bits -= 8;
-      bytes.push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
-    }
-  }
-  // Parse the 44-byte canonical WAV header written by MicCapture: skip it,
-  // treat the rest as little-endian signed 16-bit mono PCM.
-  constexpr size_t kHeaderBytes = 44;
-  if (bytes.size() <= kHeaderBytes || bytes.size() % 2 != 0) return false;
-  out.clear();
-  out.reserve((bytes.size() - kHeaderBytes) / 2);
-  for (size_t i = kHeaderBytes; i + 1 < bytes.size(); i += 2) {
-    const int16_t s = static_cast<int16_t>(bytes[i] | (bytes[i + 1] << 8));
-    out.push_back(static_cast<float>(s) / 32768.0f);
-  }
-  return !out.empty();
-}
-
-// Replace every audio part with its local transcript as a text part. Used
-// when nativeAudio is off or the endpoint has rejected input_audio.
-void foldAudioToTranscript(std::vector<ContentPart>& parts) {
-  for (auto& p : parts) {
-    if (p.type != "audio") continue;
-    std::vector<float> pcm;
-    SherpaResult r;
-    if (decodeWavDataUrl(p.dataUrl, pcm)) {
-      r = sherpaTranscribeFull(pcm);
-    }
-    ContentPart tp;
-    tp.type = "text";
-    tp.text = r.text.empty()
-        ? "（语音转写失败，无法识别这段话的内容）"
-        : ("用户说了（本地语音转写）：" + r.text);
-    p = std::move(tp);
-  }
-}
-
 } // namespace
 
 // ---- LlmSession ----
@@ -141,6 +77,100 @@ void LlmSession::setLogSink(LlmSession::LogSink sink) {
 void LlmSession::log(const std::string& line) {
   if (logSink_) logSink_(line);
   else std::fprintf(stderr, "%s\n", line.c_str());
+}
+
+bool LlmSession::usesRemoteAsr() const {
+  return !config_.nativeAudio || nativeAudioRejected_.load();
+}
+
+bool LlmSession::transcribeRemoteAudioParts(std::vector<ContentPart>& parts) {
+  bool hasAudio = false;
+  for (const auto& part : parts) {
+    if (part.type == "audio") {
+      hasAudio = true;
+      break;
+    }
+  }
+  if (!hasAudio) return true;
+
+  if (config_.asr.apiKey.empty()) {
+    lastErrorDetail_ = "缺少远程 ASR API Key，请在 aoi_config.json 的 asr.apiKey 中填写密钥";
+    log("[ASR] " + lastErrorDetail_);
+    return false;
+  }
+  if (config_.asr.baseUrl.empty() || config_.asr.model.empty()) {
+    lastErrorDetail_ = "远程 ASR 配置不完整（需要 asr.baseUrl 和 asr.model）";
+    log("[ASR] " + lastErrorDetail_);
+    return false;
+  }
+
+  std::string baseUrl = config_.asr.baseUrl;
+  while (!baseUrl.empty() && baseUrl.back() == '/') baseUrl.pop_back();
+  const std::string url = baseUrl + "/chat/completions";
+  const std::vector<std::string> headers = {
+      "Content-Type: application/json",
+      "Accept: application/json",
+      "Authorization: Bearer " + config_.asr.apiKey,
+  };
+  static const std::string kPrompt =
+      "请准确转写这段语音，只输出听到的原文，不要解释、翻译或加引号。"
+      "保留中文、英文、数字和必要的标点。没有清晰语音时输出空文本。";
+
+  for (auto& part : parts) {
+    if (part.type != "audio") continue;
+
+    RemoteAsrAudio audio;
+    if (!parseRemoteAsrAudioDataUrl(part.dataUrl, audio)) {
+      lastErrorDetail_ = "音频不是受支持的 data:audio/wav 或 data:audio/mpeg 格式";
+      log("[ASR] " + lastErrorDetail_);
+      return false;
+    }
+
+    const auto request = buildRemoteAsrRequest(config_.asr.model, kPrompt, audio);
+    const auto response = http_.postStream(
+        url, headers, request.dump(), nullptr,
+        [this]() { return isCancelled(); });
+    if (response.status >= 400 || response.status <= 0) {
+      std::string detail;
+      if (!response.body.empty()) detail = extractProviderErrorMessage(response.body);
+      if (detail.empty() && !response.transportError.empty()) {
+        detail = response.transportError;
+        if (response.osError > 0) detail += " (os errno " + std::to_string(response.osError) + ")";
+      }
+      if (detail.empty() && isCancelled()) detail = "request cancelled";
+      lastErrorDetail_ = detail.empty()
+          ? ("ASR HTTP status " + std::to_string(response.status))
+          : ("ASR HTTP " + std::to_string(response.status) + ": " + detail);
+      log("[ASR] HTTP error status=" + std::to_string(response.status) +
+          " url=" + url);
+      log("[ASR] error detail: " + lastErrorDetail_);
+      return false;
+    }
+
+    const auto parsed = parseRemoteAsrResponse(response.body);
+    if (!parsed.ok) {
+      lastErrorDetail_ = "ASR 返回了无法解析的转写结果";
+      log("[ASR] " + lastErrorDetail_);
+      return false;
+    }
+
+    ContentPart transcript;
+    transcript.type = "text";
+    transcript.text = parsed.text.empty()
+        ? "（语音中没有检测到清晰语音）"
+        : ("用户说了（远程语音转写）：" + parsed.text);
+    part = std::move(transcript);
+  }
+  return true;
+}
+
+bool LlmSession::transcribeRemoteAudioHistory(std::vector<ChatMessage>& history) {
+  if (!usesRemoteAsr()) return true;
+  for (auto& message : history) {
+    if (message.parts.empty()) continue;
+    if (!transcribeRemoteAudioParts(message.parts)) return false;
+  }
+  return true;
 }
 
 bool LlmSession::isCancelled() const {
@@ -323,12 +353,16 @@ nlohmann::json LlmSession::buildRequest(const std::vector<ChatMessage>& history)
 }
 
 // Parse SSE chunks from /chat/completions; returns tool calls and accumulated text.
-bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
+bool LlmSession::runTurn(std::vector<ChatMessage>& history,
                          std::vector<nlohmann::json>& outToolCalls,
                          std::string& outText,
                          bool* outTruncated,
                          std::string* outReasoning) {
   if (outTruncated) *outTruncated = false;
+  // Tool results may append an audio-bearing user message after prompt() has
+  // already prepared the original microphone clip. Convert those messages
+  // here as well so the text-only LLM path can never leak input_audio.
+  if (usesRemoteAsr() && !transcribeRemoteAudioHistory(history)) return false;
   const auto req = buildRequest(history);
   const std::string url = config_.baseUrl + "/chat/completions";
   // On opencode endpoints (opencode.ai zen / zen/go) send the same request
@@ -475,13 +509,13 @@ bool LlmSession::runTurn(const std::vector<ChatMessage>& history,
         : ("HTTP " + std::to_string(res.status) + ": " + detail);
     log("[LLM] error detail: " + lastErrorDetail_);
     // Auto-fallback: endpoint rejected native audio. Flip the sticky flag so
-    // every later request (including the retry of this turn) transcribes
-    // locally instead of sending input_audio blocks.
+    // later turns transcribe through the configured remote ASR instead of
+    // sending input_audio blocks to this text-only endpoint.
     if (res.status == 400 &&
         (rawBody.find("input_audio") != std::string::npos ||
          detail.find("input_audio") != std::string::npos)) {
       nativeAudioRejected_.store(true);
-      log("[LLM] endpoint does not support input_audio; falling back to local transcription");
+      log("[LLM] endpoint does not support input_audio; falling back to remote ASR");
     }
     return false;
   }
@@ -669,6 +703,7 @@ std::vector<ChatMessage> LlmSession::foldMultimodalHistory(
 
 void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>& parts) {
   if (disposed_.load()) return;
+  lastErrorDetail_.clear();
   maybeCompressHistory();
   // Fast-fail when no API key is configured: without this, the request hangs
   // on the provider (Bearer <empty> is not rejected immediately) and the UI
@@ -687,32 +722,40 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
     emit(end);
     return;
   }
-  // Split incoming parts into audio and images. BOTH persist in history
-  // (user.parts): audio is the user's spoken words — the model must be able to
-  // hear them back on later turns (Codex-style native audio context). No cap,
-  // no trimming: the prefix stays stable for provider KV-cache hits.
+  // Split incoming parts into audio and images. In text-only mode, perform the
+  // remote ASR stage before the user message enters history; this guarantees
+  // that the downstream LLM request contains text/image blocks only.
   std::vector<ContentPart> audioParts;
   std::vector<ContentPart> imageParts;
   std::string transcriptPrefix;
-  if (!config_.nativeAudio || nativeAudioRejected_.load()) {
-    std::vector<ContentPart> folded = parts;
-    foldAudioToTranscript(folded);
-    for (const auto& p : folded) {
-      if (p.type == "audio") audioParts.push_back(p);        // undecodable, kept natively
-      else if (p.type == "image_url") imageParts.push_back(p);
+  std::vector<ContentPart> preparedParts = parts;
+  if (usesRemoteAsr()) {
+    if (!transcribeRemoteAudioParts(preparedParts)) {
+      SessionEvent ev;
+      ev.type = "message_end";
+      ev.finalText = "（远程 ASR 失败：" + lastErrorDetail_ + "）";
+      emit(ev);
+      SessionEvent end;
+      end.type = "agent_end";
+      emit(end);
+      return;
+    }
+    for (const auto& p : preparedParts) {
+      if (p.type == "image_url") imageParts.push_back(p);
       else if (!p.text.empty()) transcriptPrefix += p.text + "\n";
     }
   } else {
-    for (const auto& p : parts) {
+    for (const auto& p : preparedParts) {
       if (p.type == "audio") audioParts.push_back(p);
-      else imageParts.push_back(p);
+      else if (p.type == "image_url") imageParts.push_back(p);
+      else if (!p.text.empty()) transcriptPrefix += p.text + "\n";
     }
   }
 
   // Persistent user message: text + audio + images (all co-located so the
-  // model treats them as one user turn). When audio was folded to a local
-  // transcript, the transcript rides at the FRONT of the message text so the
-  // model reads "用户说了（本地语音转写）：…\n<original instruction text>".
+  // model treats them as one user turn). In remote-ASR mode, the transcript
+  // rides at the FRONT of the message text so the model reads
+  // "用户说了（远程语音转写）：…\n<original instruction text>".
   const std::string effectiveText = transcriptPrefix.empty()
       ? text : (transcriptPrefix + text);
   ChatMessage user;
@@ -735,8 +778,9 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
   // servers 400 or ignore a tool message whose assistant call was trimmed.
   trimHistoryToMax(kMaxHistoryMessages);
 
-  // Audio now persists in the user message itself, so every runTurn of this
-  // tool loop naturally carries it — no per-turn attach machinery needed.
+  // Native audio persists in the user message itself. Remote-ASR messages are
+  // already text-only; runTurn also guards tool-produced audio before wiring
+  // the next request.
   int guard = 0;
   std::string textOut;
   std::string reasoningOut;
@@ -767,7 +811,7 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
       return;
     }
     // History (with persisted audio/images) is used directly every iteration.
-    const std::vector<ChatMessage>* turnHistory = &history_;
+    std::vector<ChatMessage>* turnHistory = &history_;
 
     std::vector<nlohmann::json> toolCalls;
     textOut.clear();

@@ -14,12 +14,22 @@ struct LlmConfig {
   std::string reasoningEffort;
   // When true, the user's voice is sent to the model as a native input_audio
   // content block (the model "hears" tone/emphasis; requires an endpoint that
-  // supports OpenAI input_audio, e.g. MiMo direct). When false (default), the
-  // voice is transcribed locally (sherpa-onnx, same engine as interpretation)
-  // and ONLY the transcript is sent — works on every OpenAI-compatible
-  // endpoint. A HTTP 400 that looks like an input_audio rejection auto-falls
-  // back to the transcript either way (see llm_client.cpp).
+  // supports OpenAI input_audio, e.g. MiMo direct). When false, the voice is
+  // sent to the configured remote ASR first and ONLY the transcript reaches
+  // the LLM — this works with text-only OpenAI-compatible endpoints. A HTTP
+  // 400 that looks like an input_audio rejection also switches to remote ASR
+  // on later turns (see llm_client.cpp).
   bool nativeAudio = true;
+};
+
+// Remote speech-to-text settings (aoi_config.json -> "asr"). The endpoint
+// receives an OpenAI input_audio chat request and returns plain transcript
+// text. The API key is filled by loadAgentConfig with the TTS key first, then
+// the LLM key, when asr.apiKey is empty.
+struct AsrConfig {
+  std::string baseUrl = "https://api.xiaomimimo.com/v1";
+  std::string apiKey;
+  std::string model = "mimo-v2.5";
 };
 
 // TTS settings (aoi_config.json -> "tts").
@@ -40,6 +50,7 @@ struct TtsSettings {
 // variables).
 struct AgentFileConfig {
   LlmConfig llm;
+  AsrConfig asr;
   TtsSettings tts;
   // Optional path to a private knowledge base file (UTF-8, one
   // "term | explanation" per line, pipe separated). Injected into the system

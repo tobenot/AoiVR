@@ -11,6 +11,8 @@ namespace {
 
 const std::string kDefaultLlmBaseUrl = "https://opencode.ai/zen/go/v1";
 const std::string kDefaultLlmModel = "mimo-v2.5";
+const std::string kDefaultAsrBaseUrl = "https://api.xiaomimimo.com/v1";
+const std::string kDefaultAsrModel = "mimo-v2.5";
 const std::string kDefaultTtsBaseUrl = "https://api.xiaomimimo.com/v1";
 const std::string kDefaultTtsModel = "mimo-v2.5-tts";
 const std::string kDefaultTtsVoice = "\xe5\x86\xb0\xe7\xb3\x96";  // 冰糖
@@ -31,6 +33,8 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
   cfg.llm.model = kDefaultLlmModel;
   cfg.llm.thinking = "disabled";  // no thinking by default (low latency)
   cfg.llm.reasoningEffort = "low";  // lowest reasoning strength by default
+  cfg.asr.baseUrl = kDefaultAsrBaseUrl;
+  cfg.asr.model = kDefaultAsrModel;
   cfg.tts.baseUrl = kDefaultTtsBaseUrl;
   cfg.tts.model = kDefaultTtsModel;
   cfg.tts.voice = kDefaultTtsVoice;
@@ -71,6 +75,12 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
       }
     }
   }
+  if (root.is_object() && root.contains("asr") && root["asr"].is_object()) {
+    const auto& asr = root["asr"];
+    cfg.asr.baseUrl = get(asr, "baseUrl", cfg.asr.baseUrl);
+    cfg.asr.apiKey = get(asr, "apiKey", "");
+    cfg.asr.model = get(asr, "model", cfg.asr.model);
+  }
   if (root.is_object() && root.contains("tts") && root["tts"].is_object()) {
     const auto& tts = root["tts"];
     if (tts.contains("enabled")) {
@@ -86,6 +96,12 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     cfg.tts.voice = get(tts, "voice", cfg.tts.voice);
     // Optional; empty keeps the upstream single-voice behavior.
     cfg.tts.englishVoice = get(tts, "englishVoice", "");
+  }
+  // MiMo uses the same credential for its chat, TTS and multimodal ASR APIs
+  // in the common setup. Keep asr.apiKey explicitly overridable, but make the
+  // zero-config path useful by falling back to TTS first and LLM second.
+  if (cfg.asr.apiKey.empty()) {
+    cfg.asr.apiKey = !cfg.tts.apiKey.empty() ? cfg.tts.apiKey : cfg.llm.apiKey;
   }
   cfg.knowledgeBase = get(root, "knowledgeBase", "");
   return cfg;

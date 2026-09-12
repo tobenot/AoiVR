@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent_config.hpp"
 #include "http_client.hpp"
 #include "image_utils.hpp"
 
@@ -93,13 +94,14 @@ class LlmSession {
     // Optional reasoning effort ("low" | "medium" | "high", MiMo accepts all
     // three alongside thinking.type). Empty = not sent (provider default).
     std::string reasoningEffort;
-    // When false (default), incoming audio parts are transcribed locally
-    // (sherpa-onnx) and replaced by their transcript before the request is
-    // built — every OpenAI-compatible endpoint works. When true, audio is
-    // sent natively as input_audio blocks; if the endpoint rejects them with
-    // a 400 mentioning input_audio, the next turn auto-falls back to local
-    // transcription for the rest of the session.
+    // When false, incoming audio parts are transcribed remotely and replaced
+    // by their transcript before the request is built — every text-only
+    // OpenAI-compatible endpoint works. When true, audio is sent natively as
+    // input_audio blocks; if the endpoint rejects them with a 400 mentioning
+    // input_audio, later turns auto-fall back to remote ASR for the rest of
+    // the session.
     bool nativeAudio = true;
+    AsrConfig asr;
   };
 
   explicit LlmSession(Config config);
@@ -150,11 +152,14 @@ void trimHistoryToMax(size_t max);
   // Sets *outTruncated=true when the stream ended with finish_reason="length"
   // (provider-side output budget hit) so the caller can continue/retry instead
   // of presenting a half reply as if it were complete.
-  bool runTurn(const std::vector<ChatMessage>& history,
+  bool runTurn(std::vector<ChatMessage>& history,
                std::vector<nlohmann::json>& outToolCalls,
                std::string& outText,
                bool* outTruncated = nullptr,
                std::string* outReasoning = nullptr);
+  bool usesRemoteAsr() const;
+  bool transcribeRemoteAudioParts(std::vector<ContentPart>& parts);
+  bool transcribeRemoteAudioHistory(std::vector<ChatMessage>& history);
   void emit(const SessionEvent& e);
   bool isCancelled() const;
   // Stable sticky-routing session id (x-opencode-session): generated once per

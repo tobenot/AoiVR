@@ -41,6 +41,30 @@ AoiVR.exe -desktop -demo # 演示模式（无需 API key）
 
 `-demo` 模式在面板上播放一段模拟对话——无需任何 key 即可体验界面，也方便录制演示。
 
+### 语音输入路线
+
+默认 `llm.nativeAudio` 为 `true`：原始语音直接发给支持 `input_audio` 的多模态
+端点。若要把 ASR 和对话模型解耦，把它设为 `false`，并配置：
+
+```json
+{
+  "llm": {
+    "baseUrl": "https://opencode.ai/zen/go/v1",
+    "apiKey": "<text-llm-key>",
+    "nativeAudio": false
+  },
+  "asr": {
+    "baseUrl": "https://api.xiaomimimo.com/v1",
+    "apiKey": "<asr-key>",
+    "model": "mimo-v2.5"
+  }
+}
+```
+
+此模式会先用 ASR 端点转写，再把纯文字交给 `llm` 端点；`asr.apiKey` 留空时会
+依次回退到 `tts.apiKey`、`llm.apiKey`。LLM 请求不会包含 `input_audio`，因此可以
+使用不支持音频输入的纯文本网关。
+
 ## 从源码构建
 
 环境要求：Visual Studio（MSVC + CMake）、Unity 6000.5（IL2CPP Windows

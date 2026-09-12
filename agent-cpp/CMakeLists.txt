@@ -29,6 +29,7 @@ add_executable(aoi-agent
   src/builtin_tools.cpp
   src/system_control.cpp
   src/llm_client.cpp
+  src/remote_asr.cpp
   src/agent_config.cpp
   src/speech_segmenter.cpp
   src/interpreter.cpp
@@ -116,6 +117,7 @@ set(AOI_AGENT_SOURCES
   src/builtin_tools.cpp
   src/system_control.cpp
   src/llm_client.cpp
+  src/remote_asr.cpp
   src/agent_config.cpp
   src/speech_segmenter.cpp
   src/interpreter.cpp
@@ -192,12 +194,31 @@ add_executable(aoi-llm-tests
   src/base64.cpp
   src/http_client.cpp
   src/llm_client.cpp
+  src/remote_asr.cpp
 )
 target_include_directories(aoi-llm-tests PRIVATE src third_party third_party/nlohmann third_party/base64)
 if(MSVC)
   target_compile_options(aoi-llm-tests PRIVATE /utf-8 /permissive-)
 endif()
 target_link_libraries(aoi-llm-tests PRIVATE CURL::libcurl ws2_32)
+
+add_executable(aoi-remote-asr-tests
+  tests/remote_asr_test.cpp
+  src/remote_asr.cpp
+)
+target_include_directories(aoi-remote-asr-tests PRIVATE src third_party third_party/nlohmann)
+if(MSVC)
+  target_compile_options(aoi-remote-asr-tests PRIVATE /utf-8 /permissive-)
+endif()
+
+add_executable(aoi-config-tests
+  tests/config_test.cpp
+  src/agent_config.cpp
+)
+target_include_directories(aoi-config-tests PRIVATE src third_party third_party/nlohmann)
+if(MSVC)
+  target_compile_options(aoi-config-tests PRIVATE /utf-8 /permissive-)
+endif()
 
 add_executable(aoi-dll-tests
   tests/dll_test.cpp

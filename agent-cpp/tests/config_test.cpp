@@ -45,6 +45,29 @@ int main() {
   {
     std::ofstream f(dir / "aoi_config.json");
     f << R"({
+      "hooks": {
+        "maxHooks": "not-an-integer",
+        "dailyBudget": "not-an-integer",
+        "scriptTimeoutSeconds": 9223372036854775807,
+        "scriptOutputLimitBytes": "not-an-integer",
+        "silentHours": {"start": "bad", "end": "bad"}
+      },
+      "sandbox": {"read_dirs": ["docs-after-bad-hooks"]}
+    })";
+  }
+  const auto malformedHooks = loadAgentConfig(dir.string());
+  CHECK(malformedHooks.hooks.maxHooks == 10);
+  CHECK(malformedHooks.hooks.dailyBudget == 100);
+  CHECK(malformedHooks.hooks.scriptTimeoutSeconds == 30);
+  CHECK(malformedHooks.hooks.scriptOutputLimitBytes == 102400);
+  CHECK(malformedHooks.hooks.silentStart == 0);
+  CHECK(malformedHooks.hooks.silentEnd == 8);
+  CHECK(malformedHooks.sandboxReadDirs.size() == 1);
+  CHECK(malformedHooks.sandboxReadDirs[0] == "docs-after-bad-hooks");
+
+  {
+    std::ofstream f(dir / "aoi_config.json");
+    f << R"({
       "llm": {"baseUrl": "http://llm.test/v1", "apiKey": "llm-key"},
       "tts": {"baseUrl": "http://tts.test/v1", "apiKey": "tts-key"},
       "asr": {"baseUrl": "http://asr.test/v1"}

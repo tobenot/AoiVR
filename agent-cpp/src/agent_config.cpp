@@ -54,6 +54,17 @@ std::string get(const nlohmann::json& obj, const char* key, const std::string& f
   return fallback;
 }
 
+int integerField(const nlohmann::json& obj, const char* key, int fallback) {
+  if (!obj.is_object() || !obj.contains(key) || !obj[key].is_number_integer())
+    return fallback;
+  try {
+    return obj[key].get<int>();
+  } catch (...) {
+    // Out-of-range JSON integers must not abort parsing of later sections.
+    return fallback;
+  }
+}
+
 } // namespace
 
 AgentFileConfig loadAgentConfig(const std::string& workDir) {
@@ -119,10 +130,9 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
     cfg.asr.apiKey = get(asr, "apiKey", "");
     cfg.asr.model = get(asr, "model", cfg.asr.model);
   }
-  // Any type-mismatched value below (e.g. "maxHooks":"abc") would throw a
-  // nlohmann type_error out of loadAgentConfig and kill agent startup.
-  // Malformed config fields degrade to defaults instead.
-  try {
+  // Parse optional sections field-by-field. A malformed value must fall back
+  // locally and must not prevent later safety settings (such as
+  // sandbox.read_dirs) from being loaded.
   if (root.is_object() && root.contains("tts") && root["tts"].is_object()) {
     const auto& tts = root["tts"];
     if (tts.contains("enabled")) {
@@ -161,16 +171,19 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
         else if (v == "true" || v == "1" || v == "on") cfg.hooks.enabled = true;
       }
     }
-    cfg.hooks.maxHooks = h.value("maxHooks", cfg.hooks.maxHooks);
-    cfg.hooks.dailyBudget = h.value("dailyBudget", cfg.hooks.dailyBudget);
+    cfg.hooks.maxHooks = integerField(h, "maxHooks", cfg.hooks.maxHooks);
+    cfg.hooks.dailyBudget = integerField(h, "dailyBudget", cfg.hooks.dailyBudget);
     if (h.contains("silentHours") && h["silentHours"].is_object()) {
-      cfg.hooks.silentStart = h["silentHours"].value("start", cfg.hooks.silentStart);
-      cfg.hooks.silentEnd = h["silentHours"].value("end", cfg.hooks.silentEnd);
+      const auto& silentHours = h["silentHours"];
+      cfg.hooks.silentStart =
+          integerField(silentHours, "start", cfg.hooks.silentStart);
+      cfg.hooks.silentEnd =
+          integerField(silentHours, "end", cfg.hooks.silentEnd);
     }
-    cfg.hooks.scriptTimeoutSeconds =
-        h.value("scriptTimeoutSeconds", cfg.hooks.scriptTimeoutSeconds);
-    cfg.hooks.scriptOutputLimitBytes =
-        h.value("scriptOutputLimitBytes", cfg.hooks.scriptOutputLimitBytes);
+    cfg.hooks.scriptTimeoutSeconds = integerField(
+        h, "scriptTimeoutSeconds", cfg.hooks.scriptTimeoutSeconds);
+    cfg.hooks.scriptOutputLimitBytes = integerField(
+        h, "scriptOutputLimitBytes", cfg.hooks.scriptOutputLimitBytes);
     // Range-clamp: invalid values would silently disable ALL hooks
     // (dailyBudget<=0 makes every fire skipped, silentEnd>23 silences
     // everything, maxHooks<=0 rejects every create).
@@ -192,9 +205,6 @@ AgentFileConfig loadAgentConfig(const std::string& workDir) {
         }
       }
     }
-  }
-  } catch (...) {
-    // A malformed field type must not abort startup; keep what parsed so far.
   }
   return cfg;
 }

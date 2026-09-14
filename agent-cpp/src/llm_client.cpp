@@ -737,6 +737,11 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
       retryWaitedMs += delayMs;
       continue;
     }
+    // A completed 2xx stream is successful even when the provider omits an
+    // optional usage object; leave the retry loop and settle tool calls below.
+    if (res.status >= 200 && res.status < 300 && res.curlCode == CURLE_OK) {
+      break;
+    }
     // Surface the real cause to the UI: prefer the provider's JSON error
     // message ("error.message" / "message"), then the transport detail, then
     // just the status code. Kept SHORT — this rides along in finalText and

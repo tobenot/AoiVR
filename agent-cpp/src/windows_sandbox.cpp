@@ -7,6 +7,7 @@
 #include <sddl.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -64,6 +65,7 @@ std::mutex g_sandboxMutex;
 // Directories granted read+execute to the sandbox user at startup (registered
 // from aoi_config.json "sandbox.read_dirs"). Guarded by g_sandboxMutex (set
 // once at agent start, read in ensureSandboxReady).
+std::vector<std::string> g_sandboxReadDirs;
 
 // ---- base64 decode (for the DPAPI blob in the secrets file) ----
 bool b64Decode(const std::string& in, std::string* out) { return Base64::Decode(in, out); }
@@ -447,6 +449,60 @@ bool protectWorkdir(const std::string& workdir) {
   return setErr == ERROR_SUCCESS;
 }
 
+bool isSameOrDescendant(const std::string& ancestor,
+                         const std::string& candidate) {
+  if (ancestor.empty() || candidate.empty()) return false;
+  if (ancestor == candidate) return true;
+  std::string prefix = ancestor;
+  if (prefix.back() != '\\') prefix.push_back('\\');
+  return candidate.rfind(prefix, 0) == 0;
+}
+
+std::string pathForCompare(std::filesystem::path path) {
+  std::string value = path.lexically_normal().string();
+  for (char& ch : value) {
+    if (ch == '/') ch = '\\';
+    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  }
+  while (value.size() > 3 && value.back() == '\\') value.pop_back();
+  return value;
+}
+
+// Resolve configured paths against the agent directory and reject the
+// directory containing aoi_config.json (and its ancestors) plus the secret
+// directory itself. The sandbox must never gain a read grant that makes the
+// credential boundary depend on a user-editable config value.
+std::vector<std::string> normalizeSandboxReadDirs(
+    const std::vector<std::string>& configured) {
+  std::vector<std::string> result;
+  const std::filesystem::path workdir =
+      std::filesystem::path(sandboxWorkspacePath()).parent_path();
+  const std::string protectedWorkdir = pathForCompare(workdir);
+  const std::string protectedSecrets =
+      pathForCompare(workdir / ".sandbox-secrets");
+  for (const auto& raw : configured) {
+    if (raw.empty()) continue;
+    std::filesystem::path path = std::filesystem::path(raw);
+    if (path.is_relative()) path = workdir / path;
+    std::error_code ec;
+    path = std::filesystem::absolute(path, ec);
+    if (ec) continue;
+    path = path.lexically_normal();
+    const std::string candidate = pathForCompare(path);
+    if (candidate.empty() ||
+        isSameOrDescendant(candidate, protectedWorkdir) ||
+        isSameOrDescendant(protectedSecrets, candidate)) {
+      std::fprintf(stderr,
+                   "[Sandbox] refusing configured read dir inside protected path: %s\n",
+                   path.string().c_str());
+      continue;
+    }
+    if (std::find(result.begin(), result.end(), path.string()) == result.end())
+      result.push_back(path.string());
+  }
+  return result;
+}
+
 // One-time sandbox setup: workspace dir + capability SID + ACL. Also denies
 // the sandbox user access to .sandbox-secrets (its DPAPI blob is machine-
 // scoped, so a readable ciphertext would be decryptable by the sandbox user).
@@ -478,6 +534,21 @@ void ensureSandboxReady() {
     if (!userSid.empty()) {
       const std::string workdir = g_workspacePath.substr(
           0, g_workspacePath.size() - std::string("sandbox").size());
+      for (const auto& readDir : g_sandboxReadDirs) {
+        const DWORD attrs = GetFileAttributesA(readDir.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES ||
+            !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+          std::fprintf(stderr, "[Sandbox] configured read dir is not a directory: %s\n",
+                       readDir.c_str());
+          continue;
+        }
+        if (!applyAceToPath(readDir, SET_ACCESS,
+                            FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+                            reinterpret_cast<PSID>(userSid.data()))) {
+          std::fprintf(stderr, "[Sandbox] read grant failed: %s, err=%lu\n",
+                       readDir.c_str(), GetLastError());
+        }
+      }
       // AGENTS.md (user-editable extra system prompt): the sandbox user must
       // NOT be able to create/modify it - otherwise the model could inject
       // its own instructions. Ensure it exists (agent-created, user-writable)
@@ -662,7 +733,10 @@ bool createRestrictedToken(HANDLE* outToken) {
 
 } // namespace
 
-
+void setSandboxReadDirs(const std::vector<std::string>& dirs) {
+  std::lock_guard<std::mutex> lk(g_sandboxMutex);
+  g_sandboxReadDirs = normalizeSandboxReadDirs(dirs);
+}
 
 // Wide-char variants used by the CreateProcessWithLogonW path: the ANSI
 // module path is GBK on CJK systems and must never be byte-widened.

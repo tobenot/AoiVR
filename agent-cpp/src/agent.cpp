@@ -151,6 +151,7 @@ AoiAgent::AoiAgent() {
   // All runtime settings (LLM + ASR + TTS) come from aoi_config.json next to the
   // executable. No .env / models.json / environment-var key mechanism anymore.
   fileConfig_ = loadAgentConfig(workDir_);
+  setSandboxReadDirs(fileConfig_.sandboxReadDirs);
   apiKey_ = fileConfig_.llm.apiKey;
 }
 

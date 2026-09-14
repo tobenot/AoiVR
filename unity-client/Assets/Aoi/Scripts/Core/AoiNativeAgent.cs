@@ -113,6 +113,11 @@ public class AoiNativeAgent : MonoBehaviour
     void Awake()
     {
         s_instance = this;
+        if (AoiOrchestrator.QuittingDueToSecondInstance)
+        {
+            enabled = false;
+            return;
+        }
         if (!autoStart) return;
         StartCoroutine(WaitForOrchestratorThenStart());
     }
@@ -130,6 +135,7 @@ public class AoiNativeAgent : MonoBehaviour
 
     public void InitAndStart()
     {
+        if (AoiOrchestrator.QuittingDueToSecondInstance) return;
         // The native agent reads ALL LLM/TTS settings from aoi_config.json in
         // the working directory. We only resolve where that directory is.
         if (string.IsNullOrEmpty(workDir))

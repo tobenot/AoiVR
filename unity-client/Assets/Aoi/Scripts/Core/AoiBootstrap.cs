@@ -31,6 +31,11 @@ public class AoiBootstrap : MonoBehaviour
     {
         var orchestrator = gameObject.AddComponent<AoiOrchestrator>();
 
+        // A duplicate instance has already scheduled its own exit in
+        // AoiOrchestrator.Awake. Do not start the native agent or construct the
+        // UI tree while that instance is winding down.
+        if (AoiOrchestrator.QuittingDueToSecondInstance) return;
+
         // Native C++ agent (aoi_agent.dll). Runs on its own background thread;
         // talks to Unity in-process via C ABI (SendJson + callback). No pipe.
         var nativeAgent = gameObject.AddComponent<AoiNativeAgent>();

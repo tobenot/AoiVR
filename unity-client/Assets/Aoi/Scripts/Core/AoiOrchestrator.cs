@@ -47,6 +47,7 @@ public class AoiOrchestrator : MonoBehaviour{
     public static bool DesktopMode;
     public static bool DemoMode;
     public static bool DemoRecordActive;
+    public static bool QuittingDueToSecondInstance { get; private set; }
     string demoRecDir;
     float demoRecStart;
     float demoRecTimer;
@@ -130,11 +131,14 @@ public class AoiOrchestrator : MonoBehaviour{
     }
     void Awake()    {
         DontDestroyOnLoad(gameObject);
+        QuittingDueToSecondInstance = false;
         try        {
             singleInstanceMutexHandle = CreateMutexW(IntPtr.Zero, true, @"Global\AoiVR_SingleInstance");
             int mutexError = Marshal.GetLastWin32Error();
             if (singleInstanceMutexHandle != IntPtr.Zero && mutexError == ERROR_ALREADY_EXISTS)            {
+                QuittingDueToSecondInstance = true;
                 quittingDueToSecondInstance = true;
+                Debug.Log("Another AoiVR instance is already running.");
                 AllocConsole();
                 var h = GetStdHandle(STD_OUTPUT_HANDLE);
                 if (h != IntPtr.Zero)                {

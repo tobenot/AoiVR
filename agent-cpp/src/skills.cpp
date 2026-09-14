@@ -416,17 +416,20 @@ std::string renderAvailableSkills(const std::vector<SkillDef>& skills,
     }
   }
 
-  // Level 3: omit trailing entries that do not fit.
+  // Level 3: omit trailing entries that do not fit. If even the fixed
+  // header cannot fit, omit the catalog entirely rather than violating the
+  // caller's budget contract.
   {
+    const int headSize = static_cast<int>(head.size());
+    if (headSize > budget) return "";
+    int remaining = budget - headSize;
     std::string body;
-    int used = 0;
     for (size_t i = 0; i < enabled.size(); ++i) {
       const std::string line = renderLine(*enabled[i], "") + "\n";
-      if (used + static_cast<int>(line.size()) > budget) break;
-      used += static_cast<int>(line.size());
+      if (static_cast<int>(line.size()) > remaining) break;
+      remaining -= static_cast<int>(line.size());
       body += line;
     }
-    if (body.empty()) return "";
     return head + body;
   }
 }

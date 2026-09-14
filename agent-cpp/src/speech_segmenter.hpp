@@ -74,6 +74,10 @@ class SpeechSegmenter {
   static constexpr size_t kMaxTranscribeWorkers = 4;
   std::vector<std::thread> workers_;
   std::mutex workersMutex_;
+  // Live (not yet finished) worker count; guarded by workersMutex_. Finished
+  // workers stay in workers_ (joined at stop) but no longer count against the
+  // backlog limit.
+  size_t activeWorkers_ = 0;
 
   // VAD handle (void* to SherpaOnnxVad when AOI_USE_SHERPA).
   void* vad_ = nullptr;

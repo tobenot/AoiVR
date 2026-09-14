@@ -3,6 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
+#include <string>
+#include <system_error>
+
+#include <miniaudio.h>
 
 namespace aoi {
 
@@ -93,6 +98,90 @@ std::vector<float> FloatRingBuffer::take(size_t n) {
 void FloatRingBuffer::reset() {
   bufs_.clear();
   total_ = 0;
+}
+
+bool wavTo8kMono(const std::vector<uint8_t>& wav, std::vector<uint8_t>& out) {
+  if (wav.size() <= 44) return false;
+  // Walk the RIFF chunk chain instead of assuming a fixed 44-byte header:
+  // the fmt chunk can be 18/40 bytes (WAVE_FORMAT_EXTENSIBLE) and LIST/fact
+  // chunks commonly precede data (Windows-generated WAVs carry LIST).
+  const auto rd16 = [&wav](size_t off) -> uint16_t {
+    return static_cast<uint16_t>(wav[off] | (wav[off + 1] << 8));
+  };
+  const auto rd32 = [&wav](size_t off) -> uint32_t {
+    return static_cast<uint32_t>(wav[off]) | (static_cast<uint32_t>(wav[off + 1]) << 8) |
+           (static_cast<uint32_t>(wav[off + 2]) << 16) |
+           (static_cast<uint32_t>(wav[off + 3]) << 24);
+  };
+  uint32_t rate = 0;
+  uint16_t ch = 0, bits = 0;
+  size_t dataOff = 0, dataLen = 0;
+  size_t off = 12;  // skip "RIFF" + size + "WAVE"
+  while (off + 8 <= wav.size()) {
+    const uint32_t sz = rd32(off + 4);
+    const size_t body = off + 8;
+    if (body + sz > wav.size()) break;
+    if (wav[off] == 'f' && wav[off + 1] == 'm' && wav[off + 2] == 't' &&
+        wav[off + 3] == ' ' && sz >= 16) {
+      ch = rd16(body + 2);
+      rate = rd32(body + 4);
+      bits = rd16(body + 14);
+    } else if (wav[off] == 'd' && wav[off + 1] == 'a' && wav[off + 2] == 't' &&
+               wav[off + 3] == 'a') {
+      dataOff = body;
+      dataLen = sz;
+      break;  // first data chunk is enough
+    }
+    off = body + sz + (sz & 1);  // chunks are word-aligned
+  }
+  if (!dataOff || bits != 16 || ch == 0 || ch > 2 || rate == 0) return false;
+  const size_t frames = dataLen / (static_cast<size_t>(ch) * 2);
+  if (frames == 0) return false;
+  const auto* pcm = reinterpret_cast<const int16_t*>(wav.data() + dataOff);
+
+  // 1) Channel conversion (e.g. stereo -> mono, miniaudio mixes channels).
+  ma_channel_converter_config ccfg = ma_channel_converter_config_init(
+      ma_format_s16, ch, nullptr, 1, nullptr, ma_channel_mix_mode_default);
+  ma_channel_converter cc;
+  if (ma_channel_converter_init(&ccfg, nullptr, &cc) != MA_SUCCESS) return false;
+  std::vector<int16_t> mono(frames);
+  const ma_uint64 nFrames = frames;
+  const ma_result rc =
+      ma_channel_converter_process_pcm_frames(&cc, mono.data(), pcm, nFrames);
+  ma_channel_converter_uninit(&cc, nullptr);
+  if (rc != MA_SUCCESS) return false;
+
+  // 2) Resampling to 8k (miniaudio's linear-interpolation resampler).
+  ma_resampler_config rcfg = ma_resampler_config_init(
+      ma_format_s16, 1, rate, 8000, ma_resample_algorithm_linear);
+  ma_resampler rs;
+  if (ma_resampler_init(&rcfg, nullptr, &rs) != MA_SUCCESS) return false;
+  const size_t outCap = frames * 8000 / rate + 8192;
+  std::vector<int16_t> outPcm(outCap);
+  ma_uint64 consumed = 0, produced = 0;
+  bool ok = false;
+  while (consumed < frames) {
+    ma_uint64 inF = frames - consumed;
+    ma_uint64 outF = outCap - produced;
+    if (outF == 0) break;
+    const ma_result rr = ma_resampler_process_pcm_frames(
+        &rs, mono.data() + consumed, &inF, outPcm.data() + produced, &outF);
+    if (rr != MA_SUCCESS) break;
+    consumed += inF;
+    produced += outF;
+    if (inF == 0 && outF == 0) break;
+  }
+  ma_resampler_uninit(&rs, nullptr);
+  if (consumed < frames || produced == 0) return false;
+
+  const auto header =
+      buildWavHeader(static_cast<uint32_t>(produced * 2), 8000, 1, 16);
+  out.clear();
+  out.reserve(header.size() + produced * 2);
+  out.insert(out.end(), header.begin(), header.end());
+  out.insert(out.end(), reinterpret_cast<const uint8_t*>(outPcm.data()),
+             reinterpret_cast<const uint8_t*>(outPcm.data()) + produced * 2);
+  return true;
 }
 
 } // namespace aoi

@@ -1,6 +1,6 @@
 {
   // knowledgeBase: 私人知识库路径，内容不入库（可选；留空 = 不注入）。
-  // UTF-8 文件，每行 "词 | 简短解释"（竖线分隔）；文件存在且非空时注入 system prompt。
+  // UTF-8 文件，每行四列：中文 | English | 日本語 | 中文解释；# 开头为注释。
   "knowledgeBase": "",
   "llm": {
     "baseUrl": "https://opencode.ai/zen/go/v1",
@@ -8,18 +8,13 @@
     "model": "mimo-v2.5",
     "thinking": "disabled",
     "reasoningEffort": "low",
-    // nativeAudio: 是否把你的原始语音直接发给大模型"亲耳听"。
-    //   true（默认）= 原始语音作为 input_audio 内容块发送（保留语气/情绪，
-    //                与上游行为一致）。需要支持音频输入的端点，
-    //                如 MiMo API 直连 https://api.xiaomimimo.com/v1 + mimo-v2.5。
-    //   false       = 先发给下方 asr 端点转写，再只把文字交给这里的 LLM。
-    //                任何 OpenAI 兼容的纯文本端点都能用（如 opencode zen/go）。
-    // 若端点返回 400 且报错提到 input_audio，后续轮次会自动降级为远程 ASR。
-    "nativeAudio": true
+    // nativeAudio=true 保持上游原生 input_audio；false 先走远程 ASR，再把纯文字交给 LLM。
+    "nativeAudio": true,
+    // 默认 false；true 时在程序重启后加载 exe 旁的 history.json。
+    "persistHistory": false
   },
-  // Optional remote ASR stage used when llm.nativeAudio is false, or after a
-  // native-audio endpoint rejects input_audio. If apiKey is empty, the loader
-  // falls back to tts.apiKey first, then llm.apiKey.
+  // 当 nativeAudio=false，或原生端点拒绝 input_audio 时使用的独立 ASR 端点。
+  // apiKey 留空时，仅在 ASR 与 TTS/LLM 的规范化 origin 相同的情况下回退。
   "asr": {
     "baseUrl": "https://api.xiaomimimo.com/v1",
     "apiKey": "",
@@ -31,5 +26,21 @@
     "apiKey": "",
     "model": "mimo-v2.5-tts",
     "voice": "冰糖"
+  },
+  // 留空时使用 %APPDATA%\\VRCX\\VRCX.sqlite3。
+  "vrcxDbPath": "",
+  // 允许 sandbox 用户读取的 exe 相对目录；不要把 aoi_config.json 所在目录加入其中。
+  "sandbox": {
+    "read_dirs": ["docs"]
+  },
+  // Hooks remain disabled for the first integration acceptance; enabling them
+  // is an explicit runtime decision because hooks may cause background LLM calls.
+  "hooks": {
+    "enabled": false,
+    "maxHooks": 10,
+    "dailyBudget": 100,
+    "silentHours": {"start": 0, "end": 8},
+    "scriptTimeoutSeconds": 30,
+    "scriptOutputLimitBytes": 102400
   }
 }

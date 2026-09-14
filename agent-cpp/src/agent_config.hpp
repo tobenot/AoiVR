@@ -1,5 +1,6 @@
-#pragma once
+﻿#pragma once
 #include <string>
+#include <vector>
 
 namespace aoi {
 
@@ -20,12 +21,18 @@ struct LlmConfig {
   // 400 that looks like an input_audio rejection also switches to remote ASR
   // on later turns (see llm_client.cpp).
   bool nativeAudio = true;
+  // Load/persist conversation history to history.json next to the exe.
+  // Default OFF: each launch starts with a clean in-memory history (old
+  // sessions are not injected - they can mislead the model with stale
+  // conclusions, e.g. obsolete tool-capability claims).
+  bool persistHistory = false;
 };
 
 // Remote speech-to-text settings (aoi_config.json -> "asr"). The endpoint
 // receives an OpenAI input_audio chat request and returns plain transcript
-// text. The API key is filled by loadAgentConfig with the TTS key first, then
-// the LLM key, when asr.apiKey is empty.
+// text. The API key is filled by loadAgentConfig with an explicit asr.apiKey
+// preferred; otherwise TTS/LLM keys are considered only when their normalized
+// origin matches the ASR origin.
 struct AsrConfig {
   std::string baseUrl = "https://api.xiaomimimo.com/v1";
   std::string apiKey;
@@ -57,6 +64,27 @@ struct AgentFileConfig {
   // prompt when the file exists and is non-empty; empty = feature off.
   // Default behavior (no file) is identical to upstream.
   std::string knowledgeBase;
+  // Optional custom path to the VRCX SQLite database (aoi_config.json top-level
+  // "vrcxDbPath"). Empty -> default %APPDATA%\VRCX\VRCX.sqlite3.
+  std::string vrcxDbPath;
+  // Timer-hook scheduler guardrails (aoi_config.json -> "hooks").
+  struct {
+    bool enabled = false;
+    int maxHooks = 10;
+    int dailyBudget = 100;
+    int silentStart = 0;  // hour, inclusive
+    int silentEnd = 8;    // hour, exclusive
+    int scriptTimeoutSeconds = 30;
+    int scriptOutputLimitBytes = 102400;
+  } hooks;
+  // Directories the sandbox user is granted READ+EXECUTE on at startup
+  // (aoi_config.json -> "sandbox" -> "read_dirs"). Relative entries resolve
+  // against the agent exe dir (e.g. "docs" -> <exeDir>\docs). Registered once
+  // per launch so the model can read shipped knowledge files that live outside
+  // the sandbox workspace. Never include aoi_config.json's directory itself:
+  // Never add the directory containing aoi_config.json here until the
+  // Windows ACL wiring has validated the final resolved path.
+  std::vector<std::string> sandboxReadDirs;
 };
 
 // Load aoi_config.json from `workDir`. Missing file / unparsable JSON / missing

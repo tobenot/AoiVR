@@ -1,4 +1,4 @@
-#include "agent.hpp"
+﻿#include "agent.hpp"
 
 #include <windows.h>
 
@@ -13,9 +13,18 @@
 #include "agent_utils.hpp"
 #include "base64.hpp"
 #include "builtin_tools.hpp"
+#include "convert_tools.hpp"
+#include "fetch_tools.hpp"
+#include "hook_tools.hpp"
 #include "image_utils.hpp"
+#include "mic.hpp"
+#include "mp3_encoder.hpp"
 #include "prompts.hpp"
+#include "registry.hpp"
+#include "skills.hpp"
+#include "sqlite_tools.hpp"
 #include "system_control.hpp"
+#include "windows_sandbox.hpp"
 namespace aoi {
 
 namespace {
@@ -26,6 +35,55 @@ namespace {
 const std::string SYSTEM_PROMPT = prompt::SYSTEMPrompt();
 const std::string TRANSLATOR_SYSTEM_PROMPT = prompt::TRANSLATORPrompt();
 const std::string FRAME_DESCRIBER_SYSTEM_PROMPT = prompt::FRAME_DESCRIBEPrompt();
+
+// ---- AGENTS.md auto-injection (user-editable extra system prompt) ----
+// The file lives in the sandbox workspace so the USER edits it; the sandbox
+// user (model processes) is DENIED write access to it (see windows_sandbox),
+// preventing self prompt-injection. Injected into the system prompt, which is
+// sent on every request and never enters the visible history, so it survives
+// history compression.
+constexpr size_t kAgentMdMaxBytes = 8000;  // bound the injection size
+
+std::string agentExeDir() {
+  char buf[MAX_PATH]{};
+  if (GetModuleFileNameA(nullptr, buf, MAX_PATH) > 0) {
+    std::string dir(buf);
+    const size_t slash = dir.find_last_of("\\/");
+    if (slash != std::string::npos) return dir.substr(0, slash + 1);
+  }
+  return "";
+}
+
+std::string loadAgentMd() {
+  const std::string dir = agentExeDir();
+  if (dir.empty()) return "";
+  const std::string path = dir + "sandbox\\AGENTS.md";
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return "";
+  std::string content((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+  if (content.size() > kAgentMdMaxBytes) {
+    // Cut on a UTF-8 character boundary so injected CJK text is never split
+    // mid-sequence (would corrupt the system prompt encoding).
+    size_t end = kAgentMdMaxBytes;
+    while (end > 0 && (static_cast<unsigned char>(content[end]) & 0xC0) == 0x80)
+      --end;
+    content.resize(end);
+    content += "\n...(truncated: AGENTS.md exceeds " +
+               std::to_string(kAgentMdMaxBytes) + " bytes)";
+  }
+  return content;
+}
+
+std::string configuredKnowledgeBase(const AgentFileConfig& cfg,
+                                    const std::string& workDir) {
+  if (cfg.knowledgeBase.empty()) return "";
+  std::string path = cfg.knowledgeBase;
+  const bool isAbs = (path.size() >= 2 && path[1] == ':') ||
+                     path[0] == '/' || path[0] == '\\';
+  if (!isAbs) path = workDir + "/" + path;
+  return prompt::knowledgeBaseSection(path);
+}
 
 const char* const ANSI_RESET = "\x1b[0m";
 const char* const ANSI_BOLD = "\x1b[1m";
@@ -131,29 +189,76 @@ bool AoiAgent::start() {
   sessionConfig_.apiKey = apiKey_;
   debug("[Agent] nativeAudio=%s\n",
         fileConfig_.llm.nativeAudio ? "on" : "off (remote ASR -> text-only LLM)");
-  // Optional private knowledge base: absolute paths are used as-is; relative
-  // paths resolve against the working directory (where aoi_config.json lives).
-  std::string kbSection;
-  if (!fileConfig_.knowledgeBase.empty()) {
-    std::string kbPath = fileConfig_.knowledgeBase;
-    const bool isAbs = (kbPath.size() >= 2 && kbPath[1] == ':') ||
-                       kbPath[0] == '/' || kbPath[0] == '\\';
-    if (!isAbs) kbPath = workDir_ + "/" + kbPath;
-    kbSection = prompt::knowledgeBaseSection(kbPath);
-  }
-  sessionConfig_.systemPrompt = SYSTEM_PROMPT + kbSection;
+  sessionConfig_.systemPrompt = SYSTEM_PROMPT + configuredKnowledgeBase(fileConfig_, workDir_);
 
-  // Tools
-  sessionConfig_.tools.push_back(makeReadTool());
-  sessionConfig_.tools.push_back(makeBashTool());
-  sessionConfig_.tools.push_back(makeEditTool());
-  sessionConfig_.tools.push_back(makeWriteTool());
-  sessionConfig_.tools.push_back(makeScreenshotTool());
-  sessionConfig_.tools.push_back(makeSystemTool());
-  sessionConfig_.tools.push_back(makeInterpretationTool());
-  sessionConfig_.tools.push_back(makeAwarenessTool());
-  sessionConfig_.tools.push_back(makeContextTool());
-  sessionConfig_.tools.push_back(makeVrSetBrightnessTool());
+  // Timer-hook scheduler: dedicated thread; hooks persist in <exeDir>/agent.db.
+  if (fileConfig_.hooks.enabled) {
+    HookConfig hc;
+    hc.maxHooks = fileConfig_.hooks.maxHooks;
+    hc.dailyBudget = fileConfig_.hooks.dailyBudget;
+    hc.silentStart = fileConfig_.hooks.silentStart;
+    hc.silentEnd = fileConfig_.hooks.silentEnd;
+    char exeBuf[MAX_PATH]{};
+    std::string hookDb = "agent.db";
+    if (GetModuleFileNameA(nullptr, exeBuf, MAX_PATH) > 0) {
+      std::string dir(exeBuf);
+      const size_t slash = dir.find_last_of("\\/");
+      if (slash != std::string::npos) dir = dir.substr(0, slash + 1);
+      hookDb = dir + "agent.db";
+    }
+    hookScheduler_ = std::make_unique<HookScheduler>(hookDb, hc);
+    // Hook LLM orchestration: independent session, SAME system prompt (incl.
+    // AGENTS.md) and SAME tool set as normal user messages - no privilege
+    // change. Runs on the scheduler thread, isolated from the main session.
+    hookScheduler_->setCallbacks(
+        [this](const std::string& intent, const std::string& context) -> std::string {
+          LlmSession::Config sc = sessionConfig_;
+          sc.systemPrompt = buildSystemPrompt();
+          sc.thinking = fileConfig_.llm.thinking;
+          sc.reasoningEffort = fileConfig_.llm.reasoningEffort;
+          auto s = std::make_shared<LlmSession>(sc);
+          s->setCancelSource([this]() { return !running_.load(); });
+          s->setLogSink([this](const std::string& line) { debug("[LLM][hook] %s\n", line.c_str()); });
+          return promptSubSession(s, "[Hook fired] 意图: " + intent + "\n" + context, {});
+        },
+        [this](const std::string& text) {
+          // Interface #2: panel notification (thread-safe sink; bypasses the
+          // message-loop reply state machine).
+          send(MessageType::AssistantResponse,
+               nlohmann::json{{"text", text}, {"partial", false}});
+          send(MessageType::ProcessingStage, nlohmann::json{{"stage", "done"}});
+        },
+        [this](const std::string& line) { debug("%s\n", line.c_str()); });
+    hookScheduler_->start();
+  }
+
+  // Tools, from the registry: system_registry.json (read-only for the sandbox
+  // user) + sandbox/user_registry.json (editable inside the sandbox). User
+  // entries override system entries; missing files keep everything enabled.
+  ensureDefaultRegistries(workDir_ + "\\system_registry.json",
+                          agentExeDir() + "sandbox\\user_registry.json");
+  // Skill roots: sandbox/skills (system, read-only for the sandbox user,
+  // deny-write enforced in windows_sandbox) + sandbox/skills_user (user,
+  // writable inside the sandbox).
+  ensureSkillDirs(agentExeDir() + "sandbox\\skills",
+                  agentExeDir() + "sandbox\\skills_user");
+  const ToolRegistry registry =
+      loadRegistries(workDir_ + "\\system_registry.json",
+                     agentExeDir() + "sandbox\\user_registry.json");
+  for (auto& [name, factory] : makeToolFactories()) {
+    if (!registry.toolEnabled(name)) {
+      debug("[Agent] tool '%s' disabled by registry\n", name.c_str());
+      continue;
+    }
+    ToolDefinition t = factory();
+    if (const ToolEntry* e = registry.findTool(name)) {
+      if (e->hasLabel) t.label = e->label;
+      if (e->hasDescription) t.description = e->description;
+      if (e->hasParameters && e->parameters.is_object())
+        t.parameters = e->parameters;
+    }
+    sessionConfig_.tools.push_back(std::move(t));
+  }
 
   session_ = std::make_shared<LlmSession>(sessionConfig_);
   // Abort the main session's in-flight LLM HTTP as soon as stop() flips
@@ -162,6 +267,25 @@ bool AoiAgent::start() {
   session_->setCancelSource([this]() { return !running_.load(); });
   session_->setLogSink([this](const std::string& line) { debug("[LLM] %s\n", line.c_str()); });
   session_->subscribe([this](const SessionEvent& e) { handleSessionEvent(e, true); });
+
+  // Persistent conversation history next to the agent exe (memory across
+  // restarts; audio/image parts are not persisted, only text).
+  {
+    char exeBuf[MAX_PATH]{};
+    if (GetModuleFileNameA(nullptr, exeBuf, MAX_PATH) > 0) {
+      std::string dir(exeBuf);
+      const size_t slash = dir.find_last_of("\\/");
+      if (slash != std::string::npos) dir = dir.substr(0, slash + 1);
+      // history.json persistence is opt-in ("llm.persistHistory": true).
+      // Default: clean in-memory history per launch - previously persisted
+      // sessions are NOT injected, so stale conclusions (e.g. obsolete
+      // tool-capability claims from an older build) never poison a new
+      // session's context.
+      if (fileConfig_.llm.persistHistory) {
+        session_->setHistoryFile(dir + "history.json");
+      }
+    }
+  }
 
   // In-process transport: the C ABI wires setOutboundSink + sendJson. There is
   // no named pipe anymore, so we are "connected" once start() runs.
@@ -178,6 +302,12 @@ bool AoiAgent::start() {
     // so the C ABI never sees an exception crossing the extern "C" boundary.
     debug("[Agent] start() failed: %s\n", ex.what());
     running_ = false;
+    // Clean up whatever already started: the hook scheduler thread captures
+    // `this`, so it MUST be stopped before the object dies. stop() early-
+    // returns once running_ is false, so clean up components directly.
+    if (hookScheduler_) hookScheduler_->stop();
+    if (msgThread_.joinable()) msgThread_.join();
+    joinWorkers();
     return false;
   }
 }
@@ -197,6 +327,13 @@ void AoiAgent::logLine(const std::string& line) const {
   {
     std::lock_guard<std::mutex> lk(logMutex_);
     sink = logSink_;
+  }
+  // Always mirror agent diagnostics to a file next to the log sink, so issues
+  // can be debugged from the release build (Unity doesn't forward agent stderr).
+  {
+    std::lock_guard<std::mutex> lk(logMutex_);
+    std::ofstream f("aoi_agent_debug.log", std::ios::app);
+    if (f) f << line << "\n";
   }
   if (sink) {
     sink(line);
@@ -251,20 +388,41 @@ bool AoiAgent::sendJson(const std::string& json) {
 }
 
 void AoiAgent::stop() {
+  debug("[Agent] stop: begin\n");
   if (!running_.exchange(false)) return;
+  debug("[Agent] stop: running=false\n");
   if (interpreter_) interpreter_->abort();
   interpActive_ = false;
   if (awareness_) awareness_->stop();
+  if (hookScheduler_) hookScheduler_->stop();
   if (session_) session_->dispose();
+  debug("[Agent] stop: disposed\n");
   mic_.abort();
+  debug("[Agent] stop: mic aborted\n");
   inProcessConnected_ = false;
   if (tts_) tts_->abort();
+  debug("[Agent] stop: tts aborted\n");
   {
     std::lock_guard<std::mutex> lk(ttsMutex_);
     ttsStopRequested_ = true;
     ttsQueue_.clear();
   }
   stopPlayback();
+  debug("[Agent] stop: playback stopped\n");
+  // Reject pending Unity requests BEFORE joining the message thread: a
+  // requestFromUnity() blocked in wait_for(70s) on the msg thread would
+  // otherwise stall the join (and stop()) for the full timeout. Resolving
+  // here unblocks the tool call, the prompt gets cancelled, and the thread
+  // exits promptly.
+  {
+    std::lock_guard<std::mutex> lk(pendingMutex_);
+    for (auto& [id, prom] : pendingRequests_) {
+      if (prom) {
+        try { prom->set_value(nlohmann::json{{"error", "Agent stopped"}}); } catch (...) {}
+      }
+    }
+    pendingRequests_.clear();
+  }
   // Wake + join the message worker.
   {
     std::lock_guard<std::mutex> lk(msgMutex_);
@@ -272,17 +430,11 @@ void AoiAgent::stop() {
   }
   msgCv_.notify_all();
   if (msgThread_.joinable()) msgThread_.join();
+  debug("[Agent] stop: msgThread joined\n");
   // Join background workers (TTS/translation) BEFORE this is destroyed, so they
   // never touch a freed AoiAgent. The cancel checks make them exit promptly.
   joinWorkers();
-  // Reject pending requests.
-  std::lock_guard<std::mutex> lk(pendingMutex_);
-  for (auto& [id, prom] : pendingRequests_) {
-    if (prom) {
-      try { prom->set_value(nlohmann::json{{"error", "Agent stopped"}}); } catch (...) {}
-    }
-  }
-  pendingRequests_.clear();
+  debug("[Agent] stop: workers joined\n");
 }
 
 void AoiAgent::onConnected() {
@@ -439,26 +591,42 @@ void AoiAgent::startRecording() {
   if (busy_) return;
   debug("[Agent] Recording...\n");
   sendTuiFeed(std::string(ANSI_GRAY) + "(recording...)" + ANSI_RESET + "\n");
-  if (!mic_.running()) mic_.start(16000);
+    if (!mic_.running()) mic_.start(32000);
 }
 
 void AoiAgent::stopAndProcess() {
   if (busy_) return;
   busy_ = true;
+  // RAII: reset busy_ on EVERY exit path (exceptions included), so a failed
+  // turn never permanently wedges the agent into refusing input/recording.
+  struct BusyGuard {
+    bool& flag;
+    ~BusyGuard() { flag = false; }
+  } guard{busy_};
 
   MicResult result = mic_.stop();
   if (result.wavBuffer.size() <= 44) {
     debug("[Agent] No audio captured\n");
     pendingShotPath_.clear();
-    busy_ = false;
     return;
   }
 
-  const double durationSec = static_cast<double>(result.wavBuffer.size() - 44) / (16000.0 * 2);
+  // Duration from the actual WAV header (sample rate at offset 24, channels
+  // at 22) - NOT a hardcoded 16k-mono assumption (32k stereo would be off by
+  // 4x and silently drop short sentences).
+  const std::vector<uint8_t>& rawWavHdr = result.wavBuffer;
+  const uint32_t rate = static_cast<uint32_t>(rawWavHdr[24]) |
+                        (static_cast<uint32_t>(rawWavHdr[25]) << 8) |
+                        (static_cast<uint32_t>(rawWavHdr[26]) << 16) |
+                        (static_cast<uint32_t>(rawWavHdr[27]) << 24);
+  const uint16_t ch = static_cast<uint16_t>(rawWavHdr[22]) |
+                      (static_cast<uint16_t>(rawWavHdr[23]) << 8);
+  const double byteRate = static_cast<double>(rate) * ch * 2;
+  const double durationSec =
+      byteRate > 0 ? static_cast<double>(rawWavHdr.size() - 44) / byteRate : 0.0;
   if (durationSec < 0.3) {
     debug("[Agent] Recording too short (%.2fs), ignoring\n", durationSec);
     pendingShotPath_.clear();
-    busy_ = false;
     return;
   }
 
@@ -467,14 +635,62 @@ void AoiAgent::stopAndProcess() {
   sentenceBuffer_.clear();
   sawAnyTextDelta_ = false;
   finalSent_ = false;
+  fullResponse_.clear();
 
   std::vector<ContentPart> parts;
   // Audio block: MiMo input_audio format (data:{MIME};base64,... prefix kept).
+  // The mic captures 32k stereo (WASAPI engine resamples/mixes; the built-in
+  // WMF MP3 encoder MFT supports 32k/44.1k/48k, and 32k is closest to the
+  // provider's native 24 kHz MiMo rate - speech is all below 12 kHz, so the
+  // server-side re-resample loses nothing). 64kbps mp3 = ~136KB per 17s vs
+  // 829KB raw wav; audio costs ~6.25 tokens/sec regardless of format. mp3 is
+  // the only compressed format the provider accepts with an in-tree encoder
+  // (verified live: format=mp3 HTTP 200; M4A/AAC data rejected; miniaudio's
+  // ma_encoder only implements WAV). Keeping history audio (no fold) is
+  // cheap. If WMF encoding fails, send the raw wav.
+  const std::vector<uint8_t>& rawWav = result.wavBuffer;
+  std::vector<uint8_t> mp3;
+  const uint8_t* audioData = rawWav.data();
+  size_t audioLen = rawWav.size();
+  std::string mime = "audio/wav";
+  if (rawWav.size() > 44) {
+    const uint32_t rate = static_cast<uint32_t>(rawWav[24]) |
+                          (static_cast<uint32_t>(rawWav[25]) << 8) |
+                          (static_cast<uint32_t>(rawWav[26]) << 16) |
+                          (static_cast<uint32_t>(rawWav[27]) << 24);
+    const uint16_t ch = static_cast<uint16_t>(rawWav[22]) |
+                        (static_cast<uint16_t>(rawWav[23]) << 8);
+    const uint16_t bits = static_cast<uint16_t>(rawWav[34]) |
+                          (static_cast<uint16_t>(rawWav[35]) << 8);
+    if (bits == 16 && (rate == 32000 || rate == 44100 || rate == 48000)) {
+      std::vector<int16_t> pcm((rawWav.size() - 44) / 2);
+      std::memcpy(pcm.data(), rawWav.data() + 44, pcm.size() * 2);
+      const std::string mp3Path = workDir_ + "\\aoi_rec.mp3";
+      if (encodeMp3(pcm, rate, ch, mp3Path)) {
+        std::ifstream f(mp3Path, std::ios::binary);
+        if (f) {
+          mp3.assign((std::istreambuf_iterator<char>(f)),
+                     std::istreambuf_iterator<char>());
+          // Guard: an empty read would make mp3.data() a nullptr into
+          // base64Encode (UB). Only switch to mp3 when there is data.
+          if (mp3.size() > 0) {
+            audioData = mp3.data();
+            audioLen = mp3.size();
+            mime = "audio/mpeg";
+          }
+        }
+        std::error_code ec;
+        std::filesystem::remove(mp3Path, ec);
+      }
+    }
+  }
   ContentPart audio;
   audio.type = "audio";
-  audio.dataUrl = "data:audio/wav;base64," +
-                  base64Encode(result.wavBuffer.data(), result.wavBuffer.size());
+  audio.dataUrl = "data:" + mime + ";base64," +
+                  base64Encode(audioData, audioLen);
   parts.push_back(audio);
+  debug("[Agent] audio %zu bytes -> %s %zu bytes\n",
+        result.wavBuffer.size(), mime.c_str(), audioLen);
 
   std::string shotNote;
   if (!pendingShotPath_.empty()) {
@@ -529,6 +745,10 @@ void AoiAgent::stopAndProcess() {
        nlohmann::json{{"stage", "understand"}, {"thought", "正在理解你的问题…"}});
   thinkingText_.clear();
   try {
+    // Same as handleUserInput: reload AGENTS.md / skills every turn so edits
+    // apply to voice turns too (the voice path used to keep a stale prompt
+    // until the next text turn).
+    session_->setSystemPrompt(buildSystemPrompt());
     session_->prompt(promptText, parts);
   } catch (const std::exception& ex) {
     debug("[Agent] SDK prompt error: %s\n", ex.what());
@@ -545,7 +765,53 @@ void AoiAgent::stopAndProcess() {
   }
 
   pendingShotPath_.clear();
-  busy_ = false;
+}
+
+// Combine the base system prompt with the user-editable AGENTS.md content.
+std::string AoiAgent::buildSystemPrompt() const {
+  std::string sp = SYSTEM_PROMPT + configuredKnowledgeBase(fileConfig_, workDir_);
+  // Agent Skills (open standard: SKILL.md catalog with progressive
+  // disclosure). Reloaded every turn so edits to sandbox/skills and
+  // sandbox/skills_user apply immediately; enablement rules come from the
+  // "skills" section of both registries.
+  const SkillRules rules = loadSkillRules(workDir_ + "\\system_registry.json",
+                                          agentExeDir() + "sandbox\\user_registry.json");
+  std::vector<SkillDef> skills = loadSkills(agentExeDir() + "sandbox\\skills",
+                                            agentExeDir() + "sandbox\\skills_user");
+  applySkillRules(skills, rules);
+  const std::string catalog = renderAvailableSkills(skills, rules.includeInstructions);
+  if (!catalog.empty()) sp += "\n\n" + catalog;
+  const std::string md = loadAgentMd();
+  if (!md.empty()) {
+    sp += "\n\n# 用户自定义指令\n编辑 sandbox\\AGENTS.md 可修改以下内容：\n" + md;
+  }
+  return sp;
+}
+
+// Tool factories keyed by tool name; the registry decides which are
+// registered and may override their label/description/parameters.
+std::vector<std::pair<std::string, std::function<ToolDefinition()>>>
+AoiAgent::makeToolFactories() {
+  using Fac = std::function<ToolDefinition()>;
+  std::vector<std::pair<std::string, Fac>> f;
+  f.emplace_back("read", [] { return makeReadTool(); });
+  f.emplace_back("bash", [] { return makeBashTool(); });
+  f.emplace_back("edit", [] { return makeEditTool(); });
+  f.emplace_back("write", [] { return makeWriteTool(); });
+  f.emplace_back("sql_query", [this] { return makeSqlQueryTool(fileConfig_.vrcxDbPath); });
+  f.emplace_back("convert", [] { return makeConvertTool(); });
+  f.emplace_back("fetch", [] { return makeFetchTool(); });
+  f.emplace_back("screenshot", [this] { return makeScreenshotTool(); });
+  f.emplace_back("system", [this] { return makeSystemTool(); });
+  f.emplace_back("interpretation", [this] { return makeInterpretationTool(); });
+  f.emplace_back("awareness", [this] { return makeAwarenessTool(); });
+  f.emplace_back("context", [this] { return makeContextTool(); });
+  f.emplace_back("vr_set_brightness", [this] { return makeVrSetBrightnessTool(); });
+  if (hookScheduler_) {
+    f.emplace_back("hook_manage",
+                   [this] { return makeHookManageTool(hookScheduler_.get()); });
+  }
+  return f;
 }
 
 void AoiAgent::handleUserInput(const Message& msg) {
@@ -558,16 +824,26 @@ void AoiAgent::handleUserInput(const Message& msg) {
   sentenceBuffer_.clear();
   sawAnyTextDelta_ = false;
   finalSent_ = false;
+  fullResponse_.clear();
   sendTuiFeed(std::string(ANSI_YELLOW) + "YOU:" + ANSI_RESET + " " + text + "\n\n");
   send(MessageType::ProcessingStage,
        nlohmann::json{{"stage", "understand"}, {"thought", "正在理解你的问题…"}});
   thinkingText_.clear();
   try {
+    // AGENTS.md auto-injection: re-read the user-editable instructions before
+    // every turn so edits apply immediately. The system prompt is sent on
+    // every request and never enters the visible history, so it survives
+    // history compression untouched.
+    session_->setSystemPrompt(buildSystemPrompt());
     session_->prompt(contextPrefix() + text);
   } catch (const std::exception& ex) {
     debug("[Agent] prompt error: %s\n", ex.what());
     if (!sawAnyTextDelta_) {
       sendFinalText(std::string("（处理失败：") + ex.what() + "）");
+    } else {
+      // Partial text already streamed and agent_end will never arrive: close
+      // the message so the UI does not stay stuck on a partial state.
+      sendFinalText(fullResponse_.empty() ? "（处理中断）" : fullResponse_);
     }
     send(MessageType::ProcessingStage, nlohmann::json{{"stage", "done"}});
     processingStageSentGenerate_ = false;
@@ -599,6 +875,14 @@ void AoiAgent::handleSessionEvent(const SessionEvent& e, bool /*isMain*/) {
            nlohmann::json{{"stage", "generate"}, {"thought", "正在生成回复…"}});
     }
     handleTextDelta(e.delta);
+  } else if (e.type == "message_reset") {
+    // The stream broke mid-reply and the SDK is retrying from scratch: discard
+    // the partial text accumulated from the failed attempt or it would be
+    // duplicated ("AB" + retried "ABCD" -> "ABABCD") on the panel. Sentences
+    // already spoken by TTS cannot be taken back; only future accumulation
+    // is reset.
+    fullResponse_.clear();
+    sentenceBuffer_.clear();
   } else if (e.type == "message_end") {
     handleMessageEnd(e.finalText);
   } else if (e.type == "tool_execution_start") {
@@ -828,6 +1112,7 @@ void AoiAgent::enqueueTts(const std::string& text) {
   if (clean.empty()) return;
   if (isTtsJunk(clean)) return;
   debug("[TTS] enqueue len=%zu: %s\n", clean.size(), clean.c_str());
+  int gen = 0;
   {
     std::lock_guard<std::mutex> lk(ttsMutex_);
     // De-dupe: if the same sentence is already queued (or is the one currently
@@ -839,10 +1124,20 @@ void AoiAgent::enqueueTts(const std::string& text) {
     // earlier interrupted batch, so this reply is not silently swallowed.
     ttsStopRequested_ = false;
     ttsQueue_.push_back(clean);
-    if (ttsPlaying_) return;
+    // Take over the playback right only when no LIVE worker owns it. A stale
+    // worker (interrupted by stopTts/stop) may still be draining its speak()
+    // HTTP call; when it returns it exits because its gen is stale. If we
+    // only looked at ttsPlaying_, that stale worker's exit would leave
+    // ttsPlaying_ true forever and every later enqueue would return early -
+    // permanent silence (the queue never gets a consumer).
+    if (ttsPlaying_ && ttsOwnerGen_ == ttsGeneration_.load()) return;
     ttsPlaying_ = true;
+    gen = ttsGeneration_.fetch_add(1) + 1;
+    ttsOwnerGen_ = gen;
   }
-  const int gen = ttsGeneration_.fetch_add(1) + 1;
+  // gen is the value computed under ttsMutex_ above; re-loading here would
+  // race with a concurrent stop/enqueue bumping the counter between the
+  // critical section and the read.
   spawnWorker(std::thread([this, gen]() {
     for (;;) {
       std::string next;
@@ -850,11 +1145,13 @@ void AoiAgent::enqueueTts(const std::string& text) {
         std::lock_guard<std::mutex> lk(ttsMutex_);
         // A newer generation superseded us, or a stop was requested: exit.
         if (ttsQueue_.empty() || ttsStopRequested_ || gen != ttsGeneration_) {
-          // Clear the playing flag whenever we're the last thing in the queue,
-          // REGARDLESS of generation: a stale worker must not leave
-          // ttsPlaying_ stuck true (that would make every later enqueueTts
-          // return early and the reply would show text with no voice).
-          if (ttsQueue_.empty()) ttsPlaying_ = false;
+          // Relinquish the playback right ONLY if we still own it - a newer
+          // worker must never have its state cleared by an old one. A stale
+          // owner leaves the right for the next enqueue to take over.
+          if (ttsOwnerGen_ == gen) {
+            ttsPlaying_ = false;
+            ttsOwnerGen_ = 0;
+          }
           break;
         }
         next = ttsQueue_.front();
@@ -1235,6 +1532,11 @@ std::shared_ptr<LlmSession> AoiAgent::createSessionWithPrompt(const std::string&
                                                               const std::string& reasoningEffort) {
   LlmSession::Config cfg = sessionConfig_;
   cfg.systemPrompt = systemPrompt;
+  // Translation runs in a separate sub-session; keep the same private term
+  // context without changing the frame describer's dedicated prompt.
+  if (systemPrompt == TRANSLATOR_SYSTEM_PROMPT) {
+    cfg.systemPrompt += configuredKnowledgeBase(fileConfig_, workDir_);
+  }
   cfg.thinking = thinking;
   cfg.reasoningEffort = reasoningEffort;
   cfg.tools.clear();
@@ -1273,6 +1575,7 @@ std::string AoiAgent::promptSubSession(const std::shared_ptr<LlmSession>& sessio
   std::string buf;
   session->subscribe([&buf](const SessionEvent& e) {
     if (e.type == "message_update") buf += e.delta;
+    if (e.type == "message_reset") buf.clear();
     if (e.type == "message_end" && buf.empty()) buf = e.finalText;
   });
   session->prompt(promptText, parts);
@@ -1320,13 +1623,19 @@ bool AoiAgent::startInterpretation(const std::string& targetLang) {
     debug("[Interp] Already running\n");
     return true;
   }
-  targetLang_ = targetLang.empty() ? "中文" : targetLang;
-  interpActive_ = true;
-  nextSeqToSend_ = 1;
-  ++interpGeneration_;  // invalidate any in-flight translations from a prior session
   {
+    std::lock_guard<std::mutex> lk(targetLangMutex_);
+    targetLang_ = targetLang.empty() ? "中文" : targetLang;
+  }
+  interpActive_ = true;
+  {
+    // nextSeqToSend_ is read/written by translation workers under this mutex;
+    // bumping the generation and clearing under the same lock makes the
+    // gen-check + insert in the workers atomic against this reset.
     std::lock_guard<std::mutex> lk(pendingTranslationsMutex_);
+    ++interpGeneration_;  // invalidate any in-flight translations from a prior session
     pendingTranslations_.clear();
+    nextSeqToSend_ = 1;
   }
   lastSegStartSample_ = -1;
   lastSegEndSample_ = -1;
@@ -1459,7 +1768,7 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
     // chat's (possibly high-effort) config.
     auto session = createSessionWithPrompt(TRANSLATOR_SYSTEM_PROMPT, "disabled", "low");
     const std::string promptText =
-        "请将以下文本翻译成" + targetLang_ + "。只输出译文，不要任何解释或前缀。\n\n" + text;
+        "请将以下文本翻译成" + currentTargetLang() + "。只输出译文，不要任何解释或前缀。\n\n" + text;
     std::shared_ptr<std::string> result = std::make_shared<std::string>();
     spawnWorker(std::thread([this, session, promptText, result, seq = seg.seq, gen, release]() {
       std::string out;
@@ -1475,6 +1784,10 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
       *result = out;
       {
         std::lock_guard<std::mutex> lk(pendingTranslationsMutex_);
+        // Re-check under the lock: a concurrent start/stopInterpretation bumps
+        // the generation while holding this mutex, so a session that was
+        // reset between the outer check and here cannot insert stale entries.
+        if (!interpActive_ || gen != interpGeneration_.load()) return;
         pendingTranslations_[seq] = result;
       }
       deliverTranslations();
@@ -1489,7 +1802,7 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
   {
     std::lock_guard<std::mutex> lk(interpHistoryMutex_);
     if (seg.sliding && (!interpPrevTrans_.empty() || !interpPrevSrc_.empty())) {
-      promptText = "将这段语音翻译成" + targetLang_ + "，只输出译文，不要多余解释。\n";
+      promptText = "将这段语音翻译成" + currentTargetLang() + "，只输出译文，不要多余解释。\n";
       promptText += "上一段语音翻译结果和原文（用于补全本句截断内容）：\n";
       if (!interpPrevTrans_.empty()) promptText += "译文: " + interpPrevTrans_ + "\n";
       if (!interpPrevSrc_.empty()) promptText += "原文: " + interpPrevSrc_ + "\n";
@@ -1499,7 +1812,7 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
                     "3. 静音、噪音片段直接输出空；\n"
                     "4. 只输出本段新增的翻译内容，不要复述历史。";
     } else {
-      promptText = "将这段语音翻译成" + targetLang_ + "，只输出译文，不要多余解释。\n"
+      promptText = "将这段语音翻译成" + currentTargetLang() + "，只输出译文，不要多余解释。\n"
                    "背景音乐或噪音不影响翻译，只要有人声就必须翻译；"
                    "只有完全静音且没有任何人声时才输出空。";
     }
@@ -1571,6 +1884,9 @@ void AoiAgent::handleTranslationSegment(const SpeechSegment& seg) {
     *result = out;
     {
       std::lock_guard<std::mutex> lk(pendingTranslationsMutex_);
+      // Re-check under the lock against a concurrent session reset (see the
+      // text-translation worker above).
+      if (!interpActive_ || gen != interpGeneration_.load()) return;
       pendingTranslations_[seq] = result;
     }
     deliverTranslations();
@@ -1622,7 +1938,7 @@ void AoiAgent::deliverTranslations() {
            nlohmann::json{{"text", trimmed}, {"seq", seq}, {"partial", false}});
       {
         std::lock_guard<std::mutex> lk(interpHistoryMutex_);
-        interpretationHistory_.push_back("[" + targetLang_ + "] " + trimmed);
+        interpretationHistory_.push_back("[" + currentTargetLang() + "] " + trimmed);
         if (interpretationHistory_.size() > 20) interpretationHistory_.erase(interpretationHistory_.begin());
       }
       debug("[Interp] #%d: %s\n", seq, trimmed.c_str());
@@ -1632,7 +1948,7 @@ void AoiAgent::deliverTranslations() {
 }
 
 bool AoiAgent::isSameLanguageAsTarget(const std::string& lang, const std::string& text) const {
-  std::string t = targetLang_;
+  std::string t = currentTargetLang();
   std::string src = lang;
   for (auto& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   for (auto& c : src) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));

@@ -27,14 +27,42 @@ int main() {
     std::ofstream f(dir / "aoi_config.json");
     f << R"({
       "llm": {"baseUrl": "http://llm.test/v1", "apiKey": "llm-key", "model": "text-model"},
-      "tts": {"apiKey": "tts-key"},
-      "asr": {"baseUrl": "http://asr.test/v1", "model": "asr-model"}
+      "tts": {"baseUrl": "http://asr.test/v1", "apiKey": "tts-key"},
+      "asr": {"baseUrl": "http://asr.test/v1", "model": "asr-model"},
+      "hooks": {"enabled": true, "maxHooks": 0},
+      "sandbox": {"read_dirs": ["docs", 42, ""]}
     })";
   }
-  const auto fallback = loadAgentConfig(dir.string());
-  CHECK(fallback.asr.baseUrl == "http://asr.test/v1");
-  CHECK(fallback.asr.model == "asr-model");
-  CHECK(fallback.asr.apiKey == "tts-key");
+  const auto sameOriginTts = loadAgentConfig(dir.string());
+  CHECK(sameOriginTts.asr.baseUrl == "http://asr.test/v1");
+  CHECK(sameOriginTts.asr.model == "asr-model");
+  CHECK(sameOriginTts.asr.apiKey == "tts-key");
+  CHECK(sameOriginTts.hooks.enabled);
+  CHECK(sameOriginTts.hooks.maxHooks == 1);
+  CHECK(sameOriginTts.sandboxReadDirs.size() == 1);
+  CHECK(sameOriginTts.sandboxReadDirs[0] == "docs");
+
+  {
+    std::ofstream f(dir / "aoi_config.json");
+    f << R"({
+      "llm": {"baseUrl": "http://llm.test/v1", "apiKey": "llm-key"},
+      "tts": {"baseUrl": "http://tts.test/v1", "apiKey": "tts-key"},
+      "asr": {"baseUrl": "http://asr.test/v1"}
+    })";
+  }
+  const auto crossOrigin = loadAgentConfig(dir.string());
+  CHECK(crossOrigin.asr.apiKey.empty());
+
+  {
+    std::ofstream f(dir / "aoi_config.json");
+    f << R"({
+      "llm": {"baseUrl": "http://asr.test/v1", "apiKey": "llm-key"},
+      "tts": {"baseUrl": "http://tts.test/v1", "apiKey": "tts-key"},
+      "asr": {"baseUrl": "http://asr.test/v1"}
+    })";
+  }
+  const auto sameOriginLlm = loadAgentConfig(dir.string());
+  CHECK(sameOriginLlm.asr.apiKey == "llm-key");
 
   {
     std::ofstream f(dir / "aoi_config.json");

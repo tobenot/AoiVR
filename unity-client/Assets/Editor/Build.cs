@@ -160,7 +160,9 @@ public static class BuildScript
 
     // Copy the files the embedded C++ agent needs at runtime next to the player:
     // aoi_config.json.example (runtime config template) into the build root,
-    // so the agent's workdir always has the template to copy from.
+    // so the agent's workdir always has the template to copy from. Also copies
+    // the VRChat integration skill docs (docs/vrchat-assistant/) so the agent's
+    // read tool can load them at runtime.
     static void CopyAgentRuntimeFiles()
     {
         try
@@ -179,11 +181,34 @@ public static class BuildScript
             System.IO.Directory.CreateDirectory(dataDir);
             System.IO.File.Copy(configExample, System.IO.Path.Combine(buildDir, "aoi_config.json.example"), true);
             Debug.Log("Copied aoi_config.json.example into build (" + buildDir + ")");
+
+            // VRChat skill docs: <project>/../docs/vrchat-assistant/ -> Build/docs/vrchat-assistant/
+            var skillSrc = System.IO.Path.GetFullPath(
+                System.IO.Path.Combine(Application.dataPath, "..", "..", "docs", "vrchat-assistant"));
+            if (System.IO.Directory.Exists(skillSrc))
+            {
+                var skillDst = System.IO.Path.Combine(buildDir, "docs", "vrchat-assistant");
+                CopyDirectory(skillSrc, skillDst);
+                Debug.Log("Copied vrchat-assistant skill docs into build (" + skillDst + ")");
+            }
+            else
+            {
+                Debug.LogWarning("docs/vrchat-assistant not found at " + skillSrc);
+            }
         }
         catch (System.Exception e)
         {
             Debug.LogError("CopyAgentRuntimeFiles failed: " + e.Message);
         }
+    }
+
+    static void CopyDirectory(string src, string dst)
+    {
+        System.IO.Directory.CreateDirectory(dst);
+        foreach (var f in System.IO.Directory.GetFiles(src))
+            System.IO.File.Copy(f, System.IO.Path.Combine(dst, System.IO.Path.GetFileName(f)), true);
+        foreach (var d in System.IO.Directory.GetDirectories(src))
+            CopyDirectory(d, System.IO.Path.Combine(dst, System.IO.Path.GetFileName(d)));
     }
 
     // Generates app.vrmanifest (with default_bindings) and copies the action

@@ -10,12 +10,14 @@
 
 namespace {
 std::atomic<bool> g_running{true};
-aoi::AoiAgent* g_agent = nullptr;
+// Atomic: the CRT signal handler runs on another thread and reads this while
+// main() may be clearing it during shutdown (a plain pointer would be a race).
+std::atomic<aoi::AoiAgent*> g_agent{nullptr};
 
 void onSignal(int) {
   printf("\n[Main] Shutting down...\n");
   g_running = false;
-  if (g_agent) g_agent->stop();
+  if (auto* a = g_agent.load()) a->stop();
 }
 } // namespace
 
@@ -29,7 +31,7 @@ int main() {
   std::signal(SIGTERM, onSignal);
 
   aoi::AoiAgent agent;
-  g_agent = &agent;
+  g_agent.store(&agent);
 
   // Route outbound messages to stdout so you can see what the agent would send
   // to Unity in the embedded (DLL) case.
@@ -73,7 +75,7 @@ int main() {
     Sleep(3000);
   }
   agent.stop();
-  g_agent = nullptr;
+  g_agent.store(nullptr);
   printf("[Main] Exited\n");
   return 0;
 }

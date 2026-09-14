@@ -35,24 +35,43 @@ class HttpClient {
   struct Result {
     long status = 0;
     std::string body;  // only populated when onData is not provided
+    // Response headers, keys lowercased (e.g. "retry-after", "content-type").
+    // Used by the caller for Retry-After backoff handling.
+    std::vector<std::pair<std::string, std::string>> headers;
+    // curl error text on transport failure (status <= 0), empty otherwise.
+    std::string error;
     // Transport-level failure detail: the curl error string (CURLE_* code +
     // human message, e.g. "Couldn't resolve host 'api.x.com'"). Empty when
     // the transfer itself succeeded (any HTTP status, even 4xx/5xx).
+    // Kept separately for the user-facing diagnostic path.
     std::string transportError;
     long osError = 0;  // CURLINFO_OS_ERRNO snapshot (0 when unknown)
+    // libcurl CURLcode of the transfer (CURLE_OK on success). A non-OK code
+    // combined with a positive HTTP status means the connection broke in the
+    // middle of the response body ("mid-stream break") - the response was NOT
+    // complete even though headers were received.
+    int curlCode = 0;
   };
 
   // POST with streaming response. headers includes "Content-Type: ..." etc.
   // The Authorization header must be supplied by the caller. When onData is
   // null, the full body is accumulated. When cancel returns true, the transfer
-  // is aborted promptly (returns status -1).
+  // is aborted promptly (returns status -1). timeoutMs > 0 applies a hard
+  // total + connect timeout (the fetch tool uses it; the LLM/TTS streams pass
+  // 0 and keep the wait-indefinitely behavior).
   Result postStream(const std::string& url, const std::vector<std::string>& headers,
                     const std::string& body, OnData onData = nullptr,
-                    CancelCheck cancel = nullptr);
+                    CancelCheck cancel = nullptr, int timeoutMs = 0);
+
+  // Simple GET returning the full body (used by the fetch tool; runs in the
+  // agent process - the sandbox's CreateProcessAsUserW children cannot use
+  // schannel, SEC_E_NO_CREDENTIALS).
+  Result get(const std::string& url, const std::vector<std::string>& headers = {},
+             int timeoutMs = 0);
 
   // Simple POST returning full body.
   Result post(const std::string& url, const std::vector<std::string>& headers,
-              const std::string& body);
+              const std::string& body, int timeoutMs = 0);
 
  private:
   void* handle();

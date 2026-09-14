@@ -93,12 +93,19 @@ Unity.exe -batchmode -nographics -quit ^
 
 输出：`unity-client/Build/AoiVR.exe`。
 
+构建会自动把以下内容复制到输出目录（随发布包分发）：
+- `aoi_config.json.example`（运行时配置模板）
+- `docs/vrchat-assistant/`（VRChat 集成技能文档——agent 运行时通过
+  `read` 工具按需加载，用于 VRChat 世界/模型/好友等操作；源码同步维护在
+  `docs/vrchat-assistant/`，勿在输出目录手改）
+
 ## 仓库结构
 
 | 路径 | 说明 |
 |---|---|
 | `agent-cpp/` | 原生 C++ agent（LLM 客户端、TTS、ASR、DSP、工具），导出为 `aoi_agent.dll`；系统提示词在 `src/prompts.hpp` |
 | `unity-client/` | Unity 工程（SteamVR overlay UI、手板面板、agent 桥接） |
+| `docs/vrchat-assistant/` | VRChat 集成技能文档（agent 运行时 `read` 加载；构建时自动复制进产物） |
 | `assets/` | 演示录制与截图 |
 
 ## 许可证

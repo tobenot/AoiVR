@@ -62,3 +62,10 @@ unity-client/ProjectSettings/PackageManagerSettings.asset
 /backup/
 /docs/private/
 /pipeline.cmd
+# Runtime-generated registry (agent writes next to cwd)
+agent-cpp/system_registry.json
+
+# Runtime secrets/config (generated locally; never upload)
+agent-cpp/.env
+agent-cpp/aoi_config.json
+.sandbox-secrets/

@@ -67,7 +67,9 @@ class EnvironmentAwareness {
   EnvironmentAwareness(const EnvironmentAwareness&) = delete;
   EnvironmentAwareness& operator=(const EnvironmentAwareness&) = delete;
 
-  bool enabled = false;
+  // Public mirror of enabled_ (agent reads it from its message thread while
+  // the host thread may call stop()) - must be atomic.
+  std::atomic<bool> enabled{false};
 
   void start();
   void stop();
@@ -96,6 +98,12 @@ class EnvironmentAwareness {
   void startAudio();
   void stopAudio();
 
+  // Guards audioSegmenter_: startAudio/stopAudio/pauseAudio/resumeAudio run
+  // on different threads (host thread during stop() vs the agent's message
+  // thread for the pause/resume tools) - a reset racing a start is a UAF.
+  std::mutex audioMutex_;
+  std::unique_ptr<SpeechSegmenter> audioSegmenter_;
+
   EnvironmentAwarenessOptions opts_;
   std::vector<VisualEntry> visualEntries_;
   std::vector<AudioEntry> audioEntries_;
@@ -115,7 +123,6 @@ class EnvironmentAwareness {
   std::mutex stopMutex_;
   std::condition_variable stopCv_;
 
-  std::unique_ptr<SpeechSegmenter> audioSegmenter_;
   mutable std::mutex mutex_;
 };
 

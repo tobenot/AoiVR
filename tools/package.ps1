@@ -22,6 +22,11 @@ if (-not $SkipUnityBuild) {
 
 Write-Host "==> 2/4 verify IL2CPP layout"
 $gameAssembly = Join-Path $build "GameAssembly.dll"
+# Unity may still be flushing large IL2CPP outputs (GameAssembly.dll is tens of
+# MB) to disk when its process exits; poll generously before giving up.
+for ($i = 0; $i -lt 120 -and -not (Test-Path $gameAssembly); $i++) {
+  Start-Sleep -Milliseconds 500
+}
 if (-not (Test-Path $gameAssembly)) {
   throw "GameAssembly.dll not found in Build root. Expected IL2CPP backend; check scriptingBackend = IL2CPP in ProjectSettings."
 }
@@ -46,7 +51,9 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 Get-ChildItem $build | Where-Object {
   $_.Name -notmatch "BackUpThisFolder_ButDontShipItWithYourGame" -and
   $_.Name -notmatch "_BurstDebugInformation_DoNotShip" -and
-  $_.Name -ne ".env"
+  $_.Name -ne ".env" -and
+  $_.Name -ne "aoi_debug.txt" -and
+  $_.Name -ne "rt_capture.png"
 } | ForEach-Object {
   Copy-Item $_.FullName $OutDir -Recurse -Force
 }
@@ -63,12 +70,36 @@ if (-not (Test-Path $agentDll)) {
 $configExample = Join-Path $root "agent-cpp\aoi_config.json.example"
 if (Test-Path $configExample) { Copy-Item $configExample (Join-Path $OutDir "aoi_config.json.example") }
 
+# Native sandbox binaries: the agent runs INSIDE aoi_agent.dll and resolves
+# the helper/setup exes next to the PROCESS exe (AoiVR.exe) - i.e. the package
+# root. Without them every tool call fails with "(sandbox: helper not found)".
+foreach ($bin in @("aoi-sandbox-helper.exe", "aoi-sandbox-setup.exe")) {
+  $srcBin = Join-Path $root "agent-cpp\build\Release\$bin"
+  if (Test-Path $srcBin) {
+    Copy-Item $srcBin (Join-Path $OutDir $bin)
+    Write-Host "  + sandbox bin: $bin"
+  } else {
+    Write-Host "WARNING: $bin not found at $srcBin - sandbox tools will fail at runtime"
+  }
+}
+
 # licenses / notices
 Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.md") $OutDir
-Copy-Item (Join-Path $root "agent-cpp\THIRD_PARTY_NOTICES.md") (Join-Path $OutDir "THIRD_PARTY_NOTICES-CPP.md")
-Copy-Item (Join-Path $root "docs\OPEN_SOURCE_DEPENDENCIES.md") $OutDir -ErrorAction SilentlyContinue
 # Verbatim official license texts (referenced by the NOTICES index).
-Copy-Item (Join-Path $root "agent-cpp\licenses") (Join-Path $OutDir "licenses") -Recurse -Force
+Copy-Item (Join-Path $root "licenses") (Join-Path $OutDir "licenses") -Recurse -Force
+
+# VRChat integration skill: single source at agent-cpp/skills/vrchat-assistant,
+# installed ONLY into sandbox\skills (the runtime skill-catalog directory the
+# agent scans). docs/ copies are gone - the model reads skills/<name>/SKILL.md
+# relative to the sandbox workspace.
+$skillSrc = Join-Path $root "agent-cpp\skills\vrchat-assistant"
+$skillSandboxDst = Join-Path $OutDir "sandbox\skills\vrchat-assistant"
+if (Test-Path $skillSrc) {
+  if (Test-Path $skillSandboxDst) { Remove-Item $skillSandboxDst -Recurse -Force }
+  New-Item -ItemType Directory -Path $skillSandboxDst -Force | Out-Null
+  Copy-Item $skillSrc\* $skillSandboxDst -Recurse -Force
+  Write-Host "  + skill installed: sandbox\skills\vrchat-assistant"
+}
 
 Write-Host "==> 4/4 launch.bat"
 $launch = @'
@@ -124,8 +155,7 @@ Aoi - VR 应用
     OpenVR (BSD-3-Clause)、nlohmann/json (MIT)、libcurl (curl license)、
     miniaudio (Public Domain / MIT-0)、stb_image (Public Domain / MIT)、
     base64 (MIT)、Liberation Sans / Noto Sans CJK / JetBrains Mono (OFL-1.1)
-  - 完整清单与官方许可文本见 THIRD_PARTY_NOTICES.md、
-    THIRD_PARTY_NOTICES-CPP.md 及 licenses/ 目录。
+  - 完整清单与官方许可文本见 THIRD_PARTY_NOTICES.md 及 licenses/ 目录。
 "@
 [System.IO.File]::WriteAllText((Join-Path $OutDir "README.txt"), $readme, [System.Text.Encoding]::UTF8)
 

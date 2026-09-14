@@ -62,6 +62,18 @@ bool SpeechSegmenter::start() {
 
   seq_ = 0;
   ring_.reset();
+  // Reset sliding-window state: the absolute sample counters are relative to
+  // "start()" and MUST be re-initialized on restart, otherwise the capture
+  // frontier can never catch up with the stale slideNextSample_ and the
+  // window stops cutting forever (and the first cut could underflow the
+  // buffer index).
+  slidePcm_.clear();
+  slideStartSample_ = 0;
+  slideNextSample_ = 0;
+  slideStepSamples_ = 0;
+  slideWindowSamples_ = 0;
+  fixedPcm_.clear();
+  fixedStartSample_ = 0;
 
   speaker_.start(
       [this](const std::vector<uint8_t>& pcm) { handlePcm(pcm); },
@@ -105,20 +117,25 @@ void SpeechSegmenter::handlePcm(const std::vector<uint8_t>& pcm) {
     // slideNextSample_ exceeds the trimmed buffer length (only the first two
     // windows would ever fire).
     const int64_t frontier = slideStartSample_ + static_cast<int64_t>(slidePcm_.size());
-    while (frontier >= slideNextSample_) {
-      // Take the LATEST W samples ending at the current frontier.
-      const int64_t total = static_cast<int64_t>(slidePcm_.size());
-      const int64_t start = total - slideWindowSamples_;
-      const int64_t winStartSample = slideStartSample_ + start;
+    while (slideNextSample_ <= frontier) {
+      // Window k ends exactly at slideNextSample_ (its scheduled cut point),
+      // not at the current buffer tail. When one late/large chunk carries the
+      // frontier past several step boundaries, ending every window at the tail
+      // would emit duplicate audio and never cover the middle positions.
+      const int64_t winEnd = slideNextSample_;
+      int64_t winStart = winEnd - slideWindowSamples_;
+      if (winStart < slideStartSample_) winStart = slideStartSample_;
+      const int64_t s0 = winStart - slideStartSample_;
+      const int64_t s1 = winEnd - slideStartSample_;
       std::vector<uint8_t> pcm16;
-      pcm16.reserve(static_cast<size_t>(slideWindowSamples_) * 2);
-      for (int64_t i = start; i < total; ++i) {
+      pcm16.reserve(static_cast<size_t>(s1 - s0) * 2);
+      for (int64_t i = s0; i < s1; ++i) {
         uint8_t b[2];
         memcpy(b, &slidePcm_[i], 2);
         pcm16.push_back(b[0]);
         pcm16.push_back(b[1]);
       }
-      handleSegment(std::move(pcm16), static_cast<int>(winStartSample));
+      handleSegment(std::move(pcm16), static_cast<int>(winStart));
       slideNextSample_ += slideStepSamples_;
     }
     return;
@@ -207,11 +224,17 @@ void SpeechSegmenter::handleSegment(std::vector<uint8_t> pcm, int startSample) {
 void SpeechSegmenter::transcribeAsync(const SpeechSegment& seg) {
   // Bound the worker backlog: each segment spawns a thread stored in
   // workers_ (only joined at stop), so a long session would accumulate
-  // threads and OS handles forever. When the backlog is full, process the
-  // segment synchronously instead of spawning another worker.
+  // threads and OS handles forever. Count LIVE workers (completed ones are
+  // removed) - a size-only check would permanently fall through to the
+  // synchronous path after the first kMax workers finished. When the backlog
+  // is full, process the segment synchronously instead of spawning another
+  // worker.
+  bool spawned = false;
   {
     std::lock_guard<std::mutex> lk(workersMutex_);
-    if (workers_.size() < kMaxTranscribeWorkers) {
+    if (activeWorkers_ < kMaxTranscribeWorkers) {
+      ++activeWorkers_;
+      spawned = true;
       workers_.emplace_back([this, seg]() {
         if (!active_.load()) return;
 #ifdef AOI_USE_SHERPA
@@ -227,10 +250,16 @@ void SpeechSegmenter::transcribeAsync(const SpeechSegment& seg) {
         // No sherpa: emit the segment without transcription (audio understanding path).
         if (opts_.onSegment) opts_.onSegment(seg);
 #endif
+        // Decrement the live count on a separate thread-safe path: joining
+        // ourselves (e.g. if the callback triggered stop()) would deadlock.
+        {
+          std::lock_guard<std::mutex> lk2(workersMutex_);
+          if (activeWorkers_ > 0) --activeWorkers_;
+        }
       });
-      return;
     }
   }
+  if (spawned) return;
   // Backlog full: synchronous fallback (same path the worker would take).
   if (opts_.onSegment) opts_.onSegment(seg);
 }
@@ -248,11 +277,22 @@ void SpeechSegmenter::stop() {
     vad_ = nullptr;
   }
 #endif
-  std::lock_guard<std::mutex> lk(workersMutex_);
-  for (auto& t : workers_) {
-    if (t.joinable()) t.join();
+  // Move the threads out under the lock, then join OUTSIDE it. If stop() was
+  // called from INSIDE an onSegment callback (i.e. from a worker thread
+  // itself), joining self would deadlock/throw: detach that one instead -
+  // active_ is already false so it exits after the callback returns.
+  std::vector<std::thread> local;
+  {
+    std::lock_guard<std::mutex> lk(workersMutex_);
+    local.swap(workers_);
+    activeWorkers_ = 0;
   }
-  workers_.clear();
+  const auto selfId = std::this_thread::get_id();
+  for (auto& t : local) {
+    if (!t.joinable()) continue;
+    if (t.get_id() == selfId) t.detach();
+    else t.join();
+  }
   if (opts_.onState) opts_.onState("stopped", "");
 }
 
@@ -265,11 +305,23 @@ void SpeechSegmenter::abort() {
     vad_ = nullptr;
   }
 #endif
-  std::lock_guard<std::mutex> lk(workersMutex_);
-  for (auto& t : workers_) {
-    if (t.joinable()) t.join();
+  // Same pattern as stop(): move the threads out under the lock, join
+  // OUTSIDE it. Joining while holding workersMutex_ deadlocks - each worker
+  // takes that mutex to decrement activeWorkers_ before exiting.
+  std::vector<std::thread> local;
+  {
+    std::lock_guard<std::mutex> lk(workersMutex_);
+    local.swap(workers_);
+    activeWorkers_ = 0;
   }
-  workers_.clear();
+  const auto selfId = std::this_thread::get_id();
+  for (auto& t : local) {
+    if (!t.joinable()) continue;
+    // Same self-join guard as stop(): an onSegment callback calling abort()
+    // from a worker thread must not join itself.
+    if (t.get_id() == selfId) t.detach();
+    else t.join();
+  }
 }
 
 } // namespace aoi

@@ -35,6 +35,9 @@ class SpeakerStream {
  private:
   void loop();
 
+  // Serializes start()/stop()/abort() so concurrent calls never race on
+  // `thread_` (std::thread is not thread-safe; double-join is UB).
+  std::mutex mtx_;
   std::thread thread_;
   std::atomic<bool> running_{false};
   std::atomic<bool> stopRequested_{false};

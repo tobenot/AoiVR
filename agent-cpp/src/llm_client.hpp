@@ -63,7 +63,8 @@ struct ChatMessage {
 // Events mirroring the pi-coding-agent session events used by agent.ts.
 struct SessionEvent {
   std::string type;  // "message_update", "message_end", "tool_execution_start",
-                     // "tool_execution_end", "agent_end", "reasoning_update"
+                     // "tool_execution_end", "agent_end", "reasoning_update",
+                     // "message_reset" (a retry discards streamed partial text)
   // For message_update / reasoning_update:
   std::string delta;
   // For message_end:
@@ -125,6 +126,19 @@ class LlmSession {
 // Trim history to at most `max` messages at user-turn boundaries (shared by
 // the hard cap and the compress-failure fallback).
 void trimHistoryToMax(size_t max);
+
+  // Persistent conversation history: set a JSON file to auto-save the history
+  // after every turn (and load it if the file already exists). This gives the
+  // agent memory across restarts. Audio/image parts are NOT persisted (only
+  // text) - they are per-session context. Pass an empty path to disable.
+  void setHistoryFile(const std::string& path);
+  void persistHistory();
+  void loadHistoryFrom(const std::string& path);
+
+  // Replace the system prompt (e.g. after re-reading AGENTS.md). The system
+  // prompt is sent on every request and is NOT part of the visible history,
+  // so it survives history compression unchanged.
+  void setSystemPrompt(const std::string& p);
   // Fold old audio-bearing user messages to their text part so the history
   // prefix stays stable and cacheable (short audio content is not covered by
   // the gateway's prompt-prefix cache). The current turn (last user message)
@@ -168,6 +182,7 @@ void trimHistoryToMax(size_t max);
 
   Config config_;
   std::vector<ChatMessage> history_;  // multi-turn conversation history
+  std::string historyFile_;  // optional JSON persistence path ("" = disabled)
   std::vector<EventCallback> listeners_;
   HttpClient http_;
   std::atomic<bool> disposed_{false};
@@ -177,6 +192,10 @@ void trimHistoryToMax(size_t max);
   std::string toolImageText_;   // caption for that persisted image user message
   ContentPart toolAudioPart_;   // audio clip (30s env sound) to persist
   std::string toolAudioText_;   // caption for the persisted audio user message
+  // Collected image/audio user messages from the current tool batch, appended
+  // to history AFTER all tool messages of the batch (parallel tool calls must
+  // stay adjacent to their assistant(tool_calls) message).
+  std::vector<ChatMessage> mediaMessages_;
 
   // Usage from the LAST successful response (provider truth, incl. audio and
   // image tokens). Drives auto-compaction: prompt_tokens is the full context

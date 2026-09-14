@@ -654,8 +654,6 @@ var dashKey = overlayKey + "_dashboard";
     }
     private float lastVRInteractionTime = 0f;
     private float lastChatUpdateTime = 0f;
-    private float sendingStartTime = 0f;   // unscaledTime when "正在发送..." began; 0 = not sending
-    private const float kSendingTimeout = 75f;  // force-exit "正在发送..." after this long
     private float lastGripReleaseTime = -100f;
     private float gripPressTime = -100f;
     private float lastHoldReleaseTime = -100f;
@@ -701,16 +699,6 @@ var dashKey = overlayKey + "_dashboard";
         // Drive the processing pipeline fade-out.
         var procUI = GetPanelUI();
         if (procUI != null) procUI.UpdateProcessing();
-        // Safety net: if the agent never replies (silent failure path), force
-        // the panel back to ready instead of leaving it stuck on "正在发送...".
-        if (sendingStartTime > 0f && Time.unscaledTime - sendingStartTime > kSendingTimeout)
-        {
-            sendingStartTime = 0f;
-            var pui = GetPanelUI();
-            if (pui != null) pui.AppendErrorText("长时间未收到回复，请重试。");
-            SetPanelStatus("● 就绪");
-            UpdateHint();
-        }
         if (DesktopMode)        {
             while (mainThreadActions.TryDequeue(out var dAction))                dAction();
             return;
@@ -1282,7 +1270,6 @@ var dashKey = overlayKey + "_dashboard";
         CurrentState = State.Standby;
         AgentSendStateChange("standby", "shot", null);
         SetPanelStatus("正在发送...", 1);
-        sendingStartTime = Time.unscaledTime;
         UpdateHint();
         Log("Dual-grip release (right hand): audio+shot sent");
     }
@@ -1303,7 +1290,6 @@ var dashKey = overlayKey + "_dashboard";
         CurrentState = State.Standby;
         AgentSendStateChange("standby", null, null);
         SetPanelStatus("正在发送...", 1);
-        sendingStartTime = Time.unscaledTime;
         UpdateHint();
         Log("Hold release: audio sent, panel stays open");
     }
@@ -2227,7 +2213,6 @@ void TakeScreenshotForAgent(string requestId)    {
                             // Reply complete (normal or error): mic back to ready,
                             // processing bar reset immediately (covers lost "done"
                             // on error paths).
-                            sendingStartTime = 0f;
                             SetPanelStatus("● 就绪");
                             UpdateHint();
                             var puiDone = GetPanelUI();

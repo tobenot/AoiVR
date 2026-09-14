@@ -259,6 +259,7 @@ public class HandPanelUI : MonoBehaviour
     // Pipeline is ephemeral: shown while the agent is working, then fades out.
     private float procFadeStart = -1f;
     private const float procFadeDuration = 0.5f;
+
     public void SetProcessingStage(string stage, string thought = null)
     {
         if (procbarText == null) return;
@@ -269,24 +270,56 @@ public class HandPanelUI : MonoBehaviour
         }
         ShowProcessing(true);
 
-        // thought summary replaces in place (mockup: "▸ 他在问这家店还开不开…")
-        procbarText.text = "▸ " + (string.IsNullOrEmpty(thought)
+        string body = string.IsNullOrEmpty(thought)
             ? (stage switch { "understand" => "正在理解…", "retrieve" => "正在检索…", _ => "正在生成…" })
-            : thought);
-        // Width: min 300 (default length), max fills the row (684 - 34*2 margins).
-        // If the text doesn't fit, Ellipsis overflow truncates the tail.
+            : thought;
+        // Data-driven window: split into lines, then assign ONLY the newest
+        // lines that fit the panel (auto-scroll to bottom). No mask/clipping:
+        // the text component only ever holds visible data.
+        var lines = new System.Collections.Generic.List<string>(body.Split('\n'));
+        if (lines.Count == 0) lines.Add("");
+        lines[0] = "▸ " + lines[0];
+
+        const float maxW = 616f;   // panel width ceiling (684 - 34*2 margins)
+        const float minW = 300f;
+        const float maxH = 90f;    // ~4 rows of 12.5pt text
+        const float minH = 34f;
+        const float wPad = 24f;    // 12px margins each side
+        const float hPad = 14f;    // 7px top/bottom
+
+        string display = string.Join("\n", lines);
+        int start = 0;
+        Vector2 pref;
+        for (int iter = 0; iter <= lines.Count; iter++)
+        {
+            display = string.Join("\n", lines.GetRange(start, lines.Count - start));
+            // Measure wrapping at the max width: x = widest line, y = total
+            // wrapped height.
+            pref = procbarText.GetPreferredValues(display, maxW - wPad, 0f);
+            float panelW = Mathf.Clamp(pref.x + wPad, minW, maxW);
+            // Re-measure at the final width (narrower wrapping changes rows).
+            if (Mathf.Abs((panelW - wPad) - (maxW - wPad)) > 0.5f)
+                pref = procbarText.GetPreferredValues(display, panelW - wPad, 0f);
+            if (pref.y <= maxH - hPad) break;
+            start++;  // drop the oldest line, keep showing the newest
+        }
+        if (start > 0) display = string.Join("\n", lines.GetRange(start, lines.Count - start));
+        procbarText.text = display;
         procbarText.ForceMeshUpdate();
+
         var procbar = procbarText.transform.parent;
         var rt = procbar.GetComponent<RectTransform>();
         var img = procbar.GetComponent<UnityEngine.UI.Image>();
+        float w = Mathf.Clamp(procbarText.preferredWidth + wPad, minW, maxW);
+        float h = Mathf.Clamp(procbarText.preferredHeight + hPad, minH, maxH);
         var size = rt.sizeDelta;
-        float w = Mathf.Clamp(procbarText.preferredWidth + 24f, 300f, 616f);
-        if (Mathf.Abs(size.x - w) > 0.5f)
+        if (Mathf.Abs(size.x - w) > 0.5f || Mathf.Abs(size.y - h) > 0.5f)
         {
             size.x = w;
+            size.y = h;
             rt.sizeDelta = size;
             if (img != null)
-                img.sprite = AoiBootstrap.MakeCutPanel2Corners(w, 34, 8, 1,
+                img.sprite = AoiBootstrap.MakeCutPanel2Corners(w, h, 8, 1,
                     new Color(0.953f, 0.902f, 0f, 0.4f),
                     new Color(0.016f, 0.024f, 0.055f, 0.9f));
         }

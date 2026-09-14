@@ -1,11 +1,18 @@
 #include "llm_client.hpp"
 
+#include <curl/curl.h>
+
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <random>
+#include <thread>
 
 #include "remote_asr.hpp"
 
@@ -48,6 +55,82 @@ std::string extractProviderErrorMessage(const std::string& body) {
   return msg;
 }
 
+// Parse Retry-After from response headers (opencode executor.ts:93-106).
+// Supports "retry-after-ms" (ms), "Retry-After" integer seconds, and
+// "Retry-After" as an HTTP date. Returns milliseconds, or -1 when absent.
+int retryAfterMs(const std::vector<std::pair<std::string, std::string>>& headers) {
+  for (auto rit = headers.rbegin(); rit != headers.rend(); ++rit) {
+    if (rit->first == "retry-after-ms") {
+      char* end = nullptr;
+      const long ms = std::strtol(rit->second.c_str(), &end, 10);
+      if (end != rit->second.c_str() && *end == '\0' && ms >= 0)
+        return static_cast<int>((std::min)(ms, 3600000L));
+      break;
+    }
+  }
+  for (auto rit = headers.rbegin(); rit != headers.rend(); ++rit) {
+    if (rit->first == "retry-after") {
+      char* end = nullptr;
+      const long secs = std::strtol(rit->second.c_str(), &end, 10);
+      // Clamp before the *1000: a huge Retry-After would overflow the int
+      // cast (implementation-defined, possibly negative) and defeat the
+      // caller's minimum-delay semantics.
+      if (end != rit->second.c_str() && *end == '\0' && secs >= 0)
+        return static_cast<int>((std::min)(secs, 3600L) * 1000);
+      const time_t when = curl_getdate(rit->second.c_str(), nullptr);
+      if (when != -1) {
+        const long diffSecs = static_cast<long>(when - time(nullptr));
+        return diffSecs > 0 ? static_cast<int>((std::min)(diffSecs, 3600L) * 1000) : 0;
+      }
+      break;
+    }
+  }
+  return -1;
+}
+
+// Stream-layer retryability. Retry on 429/5xx, or transport failures:
+// classified by the libcurl CURLcode (text matching against libcurl's
+// strerror is unreliable and misses most real-world failure strings), with a
+// lowercase-text match kept as a fallback for non-curl error text.
+bool streamRetryable(const HttpClient::Result& res) {
+  if (res.status == 429 || (res.status >= 500 && res.status <= 599)) return true;
+  switch (res.curlCode) {
+    case CURLE_GOT_NOTHING:      // response headers, then connection closed
+    case CURLE_PARTIAL_FILE:     // body cut short mid-transfer
+    case CURLE_RECV_ERROR:       // receive error / connection reset
+    case CURLE_SEND_ERROR:       // send error
+    case CURLE_COULDNT_CONNECT:  // connect refused/unreachable
+    case CURLE_COULDNT_RESOLVE_HOST:
+    case CURLE_COULDNT_RESOLVE_PROXY:
+    case CURLE_SSL_CONNECT_ERROR:
+    case CURLE_SSL_CACERT_BADFILE:
+    case CURLE_OPERATION_TIMEDOUT:
+    case CURLE_PEER_FAILED_VERIFICATION:
+      return true;
+    default:
+      break;
+  }
+  if (res.status <= 0) {
+    std::string e = res.error;
+    for (auto& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    static const char* pats[] = {"timeout", "timed out", "connection refused",
+                                 "lost", "reset", "etimedout", "fetch failed"};
+    for (const char* p : pats)
+      if (e.find(p) != std::string::npos) return true;
+  }
+  return false;
+}
+
+// Sleep in small slices so cancellation (agent stop) is honored promptly.
+void sleepInterruptible(int ms, const std::function<bool()>& cancelled) {
+  const int step = 100;
+  int waited = 0;
+  while (waited < ms) {
+    if (cancelled()) return;
+    std::this_thread::sleep_for(std::chrono::milliseconds((std::min)(step, ms - waited)));
+    waited += step;
+  }
+}
 } // namespace
 
 // ---- LlmSession ----
@@ -257,26 +340,32 @@ nlohmann::json LlmSession::buildRequest(const std::vector<ChatMessage>& history)
           //   {"type":"input_audio","input_audio":{"data":"<base64>","format":"wav"}}
           // data is the RAW base64 payload (NO "data:audio/wav;base64," prefix),
           // and there IS a `format` field. The piped-through dataUrl carries the
-          // prefix, so strip it here.
+          // prefix, so strip it here. Upstream accepts format in
+          // {mp3, flac, wav, ogg} (verified live: wav/mp3/flac HTTP 200).
+          // M4A/AAC data is rejected ("Param Incorrect"), so never emit it.
           std::string audioData = p.dataUrl;
           // Detect the media subtype from the data: URL prefix only
-          // ("data:audio/mpeg;base64," or "data:audio/wav;base64,"). Never
-          // scan the base64 payload itself (it could coincidentally contain
-          // "mp3" as text and mis-route the format).
-          bool isMp3 = false;
+          // ("data:audio/flac;base64," etc). Never scan the base64 payload
+          // itself (it could coincidentally contain "mp3" as text and
+          // mis-route the format).
+          std::string format = "wav";
           const std::string prefix = "data:audio/";
           if (audioData.rfind(prefix, 0) == 0) {
             const size_t semi = audioData.find(';', prefix.size());
             const std::string subtype = audioData.substr(
                 prefix.size(), semi == std::string::npos ? std::string::npos : semi - prefix.size());
-            isMp3 = subtype.find("mpeg") != std::string::npos ||
-                    subtype.find("mp3") != std::string::npos;
+            if (subtype.find("flac") != std::string::npos) {
+              format = "flac";
+            } else if (subtype.find("mpeg") != std::string::npos ||
+                       subtype.find("mp3") != std::string::npos) {
+              format = "mp3";
+            }
             const size_t comma = audioData.find(",", prefix.size());
             if (comma != std::string::npos) audioData = audioData.substr(comma + 1);
           }
           content.push_back({{"type", "input_audio"},
                              {"input_audio", {{"data", audioData},
-                                              {"format", isMp3 ? "mp3" : "wav"}}}});
+                                              {"format", format}}}});
         }
       }
       jm["content"] = content;
@@ -388,9 +477,38 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
   std::vector<ToolSlot> toolAccum;  // partial tool calls accumulated by index
   bool sawToolCall = false;
 
-  std::string buffer;  // SSE line buffer, scoped to this request
-  std::string rawBody;  // full raw response, captured for error diagnostics
-  const auto res = http_.postStream(url, headers, req.dump(), [&](const char* data, size_t len) {
+  // Streaming request with retry aligned to opencode's HTTP SSE path:
+  // - executor layer (executor.ts:91,345-364): HTTP 429/5xx retried up to 2x
+  //   with 500ms*2^n*[0.8,1.2] capped at 10s; Retry-After honored (capped 10s).
+  // - stream layer (processor.ts, covers the whole stream incl. mid-stream
+  //   breaks): retryable errors (429/5xx after the executor layer, connection
+  //   class failures) retried with Retry-After (uncapped) or 2s*2^(n-1) capped
+  //   30s, bounded by a 5-minute total retry-wait budget.
+  // Everything else (non-429 4xx, malformed arguments) fails immediately.
+  const int kExecutorMaxRetries = 2;
+  const int64_t kRetryBudgetMs = 300000;  // 5 min total retry wait
+  int executorAttempts = 0;
+  int streamAttempts = 0;
+  int64_t retryWaitedMs = 0;
+  // Whether ANY attempt of this call already streamed text deltas to the host.
+  // A retry regenerates the reply from scratch, so the consumer's accumulated
+  // text must be reset or it would end up with the failed attempt's prefix
+  // duplicated ("AB" + retry "ABCD" -> "ABABCD" on the panel and in TTS).
+  bool emittedTextEver = false;
+
+  for (int attempt = 0; ; ++attempt) {
+    // Per-attempt state reset.
+    toolAccum.clear();
+    sawToolCall = false;
+    outToolCalls.clear();
+    outText.clear();
+    finishReason.clear();
+    if (outReasoning) outReasoning->clear();
+
+    std::string buffer;  // SSE line buffer, scoped to this request
+    std::string rawBody;  // full raw response, captured for error diagnostics
+    bool sawTerminal = false;  // saw [DONE] or a non-empty finish_reason
+    const auto res = http_.postStream(url, headers, req.dump(), [&](const char* data, size_t len) {
     rawBody.append(data, len);
     buffer.append(data, len);    size_t pos;
     while ((pos = buffer.find('\n')) != std::string::npos) {
@@ -398,7 +516,16 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
       buffer.erase(0, pos + 1);
       if (!line.empty() && line.back() == '\r') line.pop_back();
       if (line.empty()) continue;
-      if (line == "data: [DONE]") { finishReason = "stop"; continue; }
+      // Accept both "data: [DONE]" and "data:[DONE]" spellings.
+      if (line.rfind("data:", 0) == 0) {
+        std::string payload = line.substr(5);
+        if (!payload.empty() && payload.front() == ' ') payload.erase(0, 1);
+        if (payload == "[DONE]") {
+          finishReason = "stop";
+          sawTerminal = true;
+          continue;
+        }
+      }
       const std::string prefix = "data: ";
       if (line.rfind(prefix, 0) != 0) continue;
       try {
@@ -430,8 +557,9 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
         const bool hasDelta = first.contains("delta") && first["delta"].is_object();
         // finish_reason lives INSIDE choices[0] for OpenAI-compatible streams;
         // the top-level json["finish_reason"] is almost never set.
-        if (first.contains("finish_reason") && !first["finish_reason"].is_null()) {
+        if (first.contains("finish_reason") && first["finish_reason"].is_string()) {
           finishReason = first["finish_reason"].get<std::string>();
+          sawTerminal = true;
         }
         if (hasDelta) {
           const auto& delta = first["delta"];
@@ -439,6 +567,7 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
             const std::string d = delta["content"].get<std::string>();
             outText += d;
             if (d.size()) {
+              emittedTextEver = true;
               SessionEvent ev;
               ev.type = "message_update";
               ev.delta = d;
@@ -472,9 +601,22 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
               if (toolAccum.size() <= static_cast<size_t>(idx))
                 toolAccum.resize(static_cast<size_t>(idx) + 1);
               auto& slot = toolAccum[idx];
-              const std::string id = tc.value("id", "");
-              const std::string name = tc.value("function", nlohmann::json::object()).value("name", "");
-              const std::string args = tc.value("function", nlohmann::json::object()).value("arguments", "");
+              // IMPORTANT: JSON null must NOT be treated as a string. The
+              // gateway emits `"id": null` and `"function": {"name": null,
+              // "arguments": ...}` on argument-delta chunks; nlohmann's
+              // value(key, default) throws type_error when the stored value
+              // is null, and the outer catch would swallow the WHOLE chunk
+              // line -- dropping the arguments too (the announce-only bug).
+              std::string id, name, args;
+              if (tc.contains("id") && tc["id"].is_string())
+                id = tc["id"].get<std::string>();
+              if (tc.contains("function") && tc["function"].is_object()) {
+                const auto& fn = tc["function"];
+                if (fn.contains("name") && fn["name"].is_string())
+                  name = fn["name"].get<std::string>();
+                if (fn.contains("arguments") && fn["arguments"].is_string())
+                  args = fn["arguments"].get<std::string>();
+              }
               if (!id.empty()) slot.id = id;
               if (!name.empty()) slot.name += name;
               if (!args.empty()) slot.args += args;
@@ -488,11 +630,112 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
     }
   }, [this]() { return isCancelled(); });
 
-  if (res.status >= 400 || res.status <= 0) {
-    log("[LLM] HTTP error status=" + std::to_string(res.status) + " url=" + url);
-    if (!rawBody.empty()) {
-      const size_t n = rawBody.size() < 600 ? rawBody.size() : 600;
-      log("[LLM] response head: " + rawBody.substr(0, n));
+    // ---- Retry decision (aligned with opencode) ----
+    if (res.status == -1) {
+      log("[LLM] stream cancelled; aborting turn");
+      return false;
+    }
+    bool shouldRetry = false;
+    int delayMs = 0;
+    const char* retryLayer = nullptr;
+    // A clean HTTP close WITHOUT the [DONE] sentinel or any finish_reason is
+    // only a real truncation when NOTHING was produced: several stream
+    // endpoints end without the sentinel (or carry finish_reason only as
+    // null), so retrying any no-sentinel response would loop forever - each
+    // retry regenerates the entire reply (minutes with long reasoning).
+    // Retry only when the stream completed with zero content AND zero tool
+    // calls AND no termination marker (an abnormal empty response).
+    if (res.status > 0 && res.curlCode == CURLE_OK && !sawTerminal &&
+        outText.empty() && !sawToolCall) {
+      log("[LLM] stream ended empty without [DONE]/finish_reason; retrying");
+      delayMs = 2000 * (1 << streamAttempts);
+      delayMs = (std::min)(delayMs, 30000);
+      ++streamAttempts;
+      retryLayer = "stream";
+      shouldRetry = true;
+    } else if (res.status > 0 && res.curlCode != CURLE_OK) {
+      // Mid-stream break: HTTP 200 headers received but the connection died
+      // before the body completed (curl reports a non-OK code). The partial
+      // response must NEVER be presented as the final answer - retry it like a
+      // transport failure.
+      log("[LLM] mid-stream break: status=" + std::to_string(res.status) +
+          " curl=" + std::to_string(res.curlCode) + " error=" + res.error);
+      if (streamRetryable(res)) {
+        delayMs = retryAfterMs(res.headers);
+        if (delayMs < 0) delayMs = 2000 * (1 << streamAttempts);
+        delayMs = (std::min)(delayMs, 30000);
+        ++streamAttempts;
+        retryLayer = "stream";
+        shouldRetry = true;
+      } else {
+        log("[LLM] mid-stream break (not retryable); aborting turn");
+        return false;
+      }
+    } else if (res.status >= 400) {
+      const bool retryableStatus = res.status == 429 || (res.status >= 500 && res.status <= 599);
+      if (retryableStatus && executorAttempts < kExecutorMaxRetries) {
+        delayMs = retryAfterMs(res.headers);
+        if (delayMs < 0) delayMs = static_cast<int>(500.0 * (1 << executorAttempts) *
+                                                    (0.8 + (rand() % 5) * 0.1));
+        delayMs = (std::min)(delayMs, 10000);
+        ++executorAttempts;
+        retryLayer = "executor";
+        shouldRetry = true;
+      } else if (streamRetryable(res)) {
+        delayMs = retryAfterMs(res.headers);
+        if (delayMs < 0) delayMs = 2000 * (1 << streamAttempts);
+        delayMs = (std::min)(delayMs, 30000);
+        ++streamAttempts;
+        retryLayer = "stream";
+        shouldRetry = true;
+      } else {
+        log("[LLM] HTTP error status=" + std::to_string(res.status) + " url=" + url);
+        if (!rawBody.empty()) {
+          const size_t n = rawBody.size() < 600 ? rawBody.size() : 600;
+          log("[LLM] response head: " + rawBody.substr(0, n));
+        }
+        return false;
+      }
+    } else if (res.status <= 0) {
+      // Transport failure: stream-layer retry only for retryable patterns.
+      if (streamRetryable(res)) {
+        delayMs = retryAfterMs(res.headers);
+        if (delayMs < 0) delayMs = 2000 * (1 << streamAttempts);
+        delayMs = (std::min)(delayMs, 30000);
+        ++streamAttempts;
+        retryLayer = "stream";
+        shouldRetry = true;
+      } else {
+        log("[LLM] HTTP error status=" + std::to_string(res.status) + " url=" + url +
+            " error=" + res.error);
+        return false;
+      }
+    }
+
+    if (shouldRetry) {
+      if (emittedTextEver) {
+        // Tell the host to discard the partial text streamed by the failed
+        // attempt; the next attempt starts from a clean slate.
+        SessionEvent ev;
+        ev.type = "message_reset";
+        emit(ev);
+        emittedTextEver = false;
+      }
+      // Floor the delay: a 0/negative Retry-After would spin a zero-delay
+      // hot loop that never consumes the retry budget.
+      if (delayMs < 500) delayMs = 500;
+      if (retryWaitedMs + delayMs > kRetryBudgetMs) {
+        log("[LLM] retry wait budget exhausted (" + std::to_string(kRetryBudgetMs) +
+            "ms); aborting turn");
+        return false;
+      }
+      log(std::string("[LLM] ") + retryLayer + "-layer retry in " +
+          std::to_string(delayMs) + "ms (attempt " + std::to_string(attempt + 1) +
+          ", waited " + std::to_string(retryWaitedMs) + "ms)");
+      sleepInterruptible(delayMs, [this]() { return isCancelled(); });
+      if (isCancelled()) return false;
+      retryWaitedMs += delayMs;
+      continue;
     }
     // Surface the real cause to the UI: prefer the provider's JSON error
     // message ("error.message" / "message"), then the transport detail, then
@@ -531,6 +774,11 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
     *outTruncated = true;
   }
 
+  // Settlement aligned with opencode (tool-stream.ts finishAll + shared.ts:155):
+  // EMPTY arguments are normalized to "{}" and go to the tool loop (the tool
+  // layer reports the missing parameter back to the model); MALFORMED JSON
+  // fails the turn immediately (eventError equivalent -- never retried, never
+  // dispatched to a tool).
   if (sawToolCall) {
     for (auto& slot : toolAccum) {
       nlohmann::json call;
@@ -538,15 +786,111 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
       call["type"] = "function";
       call["function"]["name"] = slot.name;
       // OpenAI protocol requires arguments to be a JSON-ENCODED STRING (the raw
-      // accumulated stream text). Parsing it to an object here breaks the
-      // round-trip: when this tool_calls array is sent back on the next turn,
-      // the provider rejects a non-string `arguments` with HTTP 400. Keep the
-      // original string exactly as streamed.
-      call["function"]["arguments"] = slot.args;
+      // accumulated stream text). Validated below, so it is safe to
+      // round-trip verbatim on the next turn.
+      std::string args = slot.args;
+      if (args.empty()) {
+        args = "{}";
+      } else if (nlohmann::json::parse(args, nullptr, false).is_discarded()) {
+        log("[LLM] tool call '" + slot.name + "' has malformed JSON arguments; aborting turn");
+        return false;
+      }
+      if (args.size() > 300) {
+        log("[ToolStream] call name=" + slot.name + " rawArgs(len=" +
+            std::to_string(args.size()) + ") head=\"" + args.substr(0, 300) + "\"");
+      } else {
+        log("[ToolStream] call name=" + slot.name + " rawArgs=\"" + args + "\"");
+      }
+      call["function"]["arguments"] = args;
       outToolCalls.push_back(std::move(call));
     }
   }
   return true;
+  }
+}
+
+void LlmSession::setHistoryFile(const std::string& path) {
+  historyFile_ = path;
+  if (!path.empty()) loadHistoryFrom(path);
+}
+
+void LlmSession::setSystemPrompt(const std::string& p) {
+  config_.systemPrompt = p;
+}
+
+void LlmSession::loadHistoryFrom(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) return;
+  std::string content((std::istreambuf_iterator<char>(f)),
+                      std::istreambuf_iterator<char>());
+  auto j = nlohmann::json::parse(content, nullptr, false);
+  if (j.is_discarded() || !j.is_object() || !j.contains("messages") ||
+      !j["messages"].is_array()) {
+    // Corrupt history must not be silently discarded - the conversation
+    // memory would vanish without a trace. Surface it in the logs.
+    log("[LLM] WARNING: history file " + path + " is corrupted or unreadable; "
+        "starting with an empty history");
+    return;
+  }
+  history_.clear();
+  for (const auto& mj : j["messages"]) {
+    if (!mj.is_object()) continue;
+    ChatMessage m;
+    m.role = mj.value("role", "");
+    m.content = mj.value("content", "");
+    m.toolCallId = mj.value("tool_call_id", "");
+    m.reasoningContent = mj.value("reasoning_content", "");
+    if (mj.contains("tool_calls") && mj["tool_calls"].is_array())
+      m.toolCalls = mj["tool_calls"].get<std::vector<nlohmann::json>>();
+    if (mj.contains("parts") && mj["parts"].is_array()) {
+      for (const auto& p : mj["parts"]) {
+        if (p.is_object() && p.value("type", "") == "text") {
+          ContentPart cp;
+          cp.type = "text";
+          cp.text = p.value("text", "");
+          m.parts.push_back(std::move(cp));
+        }
+      }
+    }
+    history_.push_back(std::move(m));
+  }
+  if (!history_.empty())
+    log("[LLM] history loaded from " + path + " (" +
+        std::to_string(history_.size()) + " messages)");
+}
+
+void LlmSession::persistHistory() {
+  if (historyFile_.empty()) return;
+  nlohmann::json j;
+  j["version"] = 1;
+  j["messages"] = nlohmann::json::array();
+  for (const auto& m : history_) {
+    nlohmann::json mj;
+    mj["role"] = m.role;
+    mj["content"] = m.content;
+    if (!m.toolCallId.empty()) mj["tool_call_id"] = m.toolCallId;
+    if (!m.reasoningContent.empty()) mj["reasoning_content"] = m.reasoningContent;
+    if (!m.toolCalls.empty()) mj["tool_calls"] = m.toolCalls;
+    // Only text parts are persisted (audio/image are per-session context).
+    nlohmann::json parts = nlohmann::json::array();
+    for (const auto& p : m.parts) {
+      if (p.type == "text") parts.push_back({{"type", "text"}, {"text", p.text}});
+    }
+    if (!parts.empty()) mj["parts"] = parts;
+    j["messages"].push_back(std::move(mj));
+  }
+  // Atomic write: dump to a temp file then rename over the target, so a crash
+  // mid-write can never leave a truncated history.json (which the loader
+  // silently discards, losing the whole conversation memory).
+  const std::string tmp = historyFile_ + ".tmp";
+  {
+    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    f << j.dump();
+  }
+  std::error_code ec;
+  std::filesystem::rename(tmp, historyFile_, ec);
+  if (ec) std::filesystem::remove(tmp, ec);  // rename failed (e.g. locked)
 }
 
 void LlmSession::maybeCompressHistory() {
@@ -567,6 +911,17 @@ void LlmSession::maybeCompressHistory() {
                                                : "用户";
       transcript += std::string(who) + ": " + m.content + "\n";
     }
+    // Multimodal messages carry their text in parts (content is empty):
+    // without them the captions (screenshot descriptions, voice transcript)
+    // never reach the summary.
+    for (const auto& p : m.parts) {
+      if (p.type == "text" && !p.text.empty()) {
+        const char* who = m.role == "assistant" ? "助手"
+                          : m.role == "tool"     ? "工具结果"
+                                                 : "用户";
+        transcript += std::string(who) + ": " + p.text + "\n";
+      }
+    }
   }
 
   std::string summary;
@@ -582,9 +937,19 @@ void LlmSession::maybeCompressHistory() {
           "Output ONLY the summary, in the same language as the chat.";
       sc.tools.clear();
       LlmSession summarizer(sc);
+      // CRITICAL: wire the SAME cancel source and a log sink. The summarizer
+      // runs a full HTTP request BEFORE the main prompt; without a cancel
+      // source the host's "interrupt everything" cannot reach it (observed
+      // live: a stuck summarizer wedged the message thread for minutes, the
+      // follow-up turn's interrupt had no effect, and nothing was logged
+      // because there was no log sink).
+      summarizer.setCancelSource([this]() { return isCancelled(); });
+      summarizer.setLogSink(
+          [this](const std::string& line) { log(std::string("[LLM][compress] ") + line); });
       std::string got;
       summarizer.subscribe([&](const SessionEvent& e) {
         if (e.type == "message_update") got += e.delta;
+        if (e.type == "message_reset") got.clear();
         if (e.type == "message_end") got = e.finalText.empty() ? got : e.finalText;
       });
       summarizer.prompt("请将以下对话历史压缩为简洁摘要（保留关键事实、用户偏好、任务状态、未完成事项），只输出摘要：\n\n" +
@@ -603,6 +968,10 @@ void LlmSession::maybeCompressHistory() {
     history_.clear();
     history_.push_back(std::move(sumMsg));
     log("[LLM] history compressed: old history replaced by summary");
+    // Persist the compressed history so the disk file doesn't keep growing
+    // with the pre-compression messages (restart would otherwise resurrect
+    // them and the compression would be wasted).
+    persistHistory();
   } else {
     // Summarizer failed (network / too long): degrade by keeping only the
     // newest messages so the request still fits the window. Trim at complete
@@ -615,23 +984,28 @@ void LlmSession::maybeCompressHistory() {
 
 // Trim history down to at most `max` messages, cutting at user-message
 // boundaries so an assistant(tool_calls) is never dropped while its tool
-// response stays behind.
+// response stays behind. The cut lands on the FIRST user message at/after
+// `excess` - keeping at most `max` messages after it.
 void LlmSession::trimHistoryToMax(size_t max) {
   if (history_.size() <= max) return;
   const size_t excess = history_.size() - max;
-  size_t cut = 0;
-  for (size_t i = 0; i < excess; ++i) {
-    if (history_[i].role == "user") cut = i + 1;
+  size_t cut = history_.size();
+  for (size_t i = excess; i < history_.size(); ++i) {
+    if (history_[i].role == "user") { cut = i; break; }
   }
-  if (cut == 0) {
-    for (size_t i = 0; i < history_.size(); ++i) {
-      if (history_[i].role == "user") { cut = i; break; }
+  if (cut == history_.size()) {
+    // No user message in the kept region: fall back to cutting after the last
+    // user message before it, or plain trimming when there are no user
+    // messages at all (pure system/tool tail).
+    for (size_t i = history_.size(); i-- > 0;) {
+      if (history_[i].role == "user") { cut = i + 1; break; }
     }
+    if (cut == history_.size()) cut = excess;
   }
   if (cut > 0) {
     history_.erase(history_.begin(), history_.begin() + cut);
   } else {
-    history_.erase(history_.begin(), history_.begin() + (history_.size() - max));
+    history_.erase(history_.begin(), history_.begin() + excess);
   }
 }
 
@@ -657,13 +1031,15 @@ bool hasAudioParts(const ChatMessage& m) {
 
 std::vector<ChatMessage> LlmSession::foldMultimodalHistory(
     const std::vector<ChatMessage>& history) const {
-  // Speech is NEVER carried in history again: every audio-bearing user
-  // message EXCEPT the current turn (the last user message, which the model
-  // must hear NOW) is folded down to its text part on send.
-  // Images (screenshots) are NOT folded: verified live that long image_url
-  // content DOES hit the gateway's prompt-prefix cache (1000x1000 PNG:
-  // 1920/1937 cached on repeat), so keeping them in history keeps the
-  // prefix stable and fully cacheable as the conversation grows.
+  // Product default: keep historical audio verbatim (no folding). Verified in
+  // the cache lab: no-fold + mp3 gives 87-93% prompt-cache hits with stable
+  // TTFT (3.1-5.6s) over 10 turns, while folding breaks the cache chain every
+  // turn because the folded placeholder never matches the raw base64 of the
+  // earlier turn (folded runs: cached stuck at 1024 or ~81% hit rate with
+  // growing TTFT). Audio is mp3 now (~79KB/17s), so keeping history audio is
+  // cheap. Images stay in history either way (verified cacheable).
+  // Legacy switch: AOI_FOLD=1 restores the old fold-to-text behavior.
+  if (!std::getenv("AOI_FOLD")) return history;
   // Locate the current-turn user message: the LAST user message in history.
   size_t lastUserIdx = history.size();
   for (size_t i = history.size(); i-- > 0;) {
@@ -771,6 +1147,7 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
     for (auto& ap : audioParts) user.parts.push_back(ap);
   }
   history_.push_back(user);
+  persistHistory();
   // Cap history: keep the most recent messages (system prompt is re-added by
   // buildRequest). Trim at complete-turn boundaries (cut at the first user
   // message that leaves at most kMaxHistoryMessages), so we never drop an
@@ -812,6 +1189,12 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
     }
     // History (with persisted audio/images) is used directly every iteration.
     std::vector<ChatMessage>* turnHistory = &history_;
+    // Snapshot the history size BEFORE the turn so a failed request can roll
+    // back the assistant(tool_calls) + tool messages it appended. Without the
+    // rollback, a mid-turn failure (e.g. gateway 400/500) leaves a poisoned
+    // assistant message with malformed tool_calls in history, and every
+    // subsequent turn re-sends it and fails the same way.
+    const size_t histBeforeTurn = history_.size();
 
     std::vector<nlohmann::json> toolCalls;
     textOut.clear();
@@ -819,6 +1202,7 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
     bool truncated = false;
     const bool ok = runTurn(*turnHistory, toolCalls, textOut, &truncated, &reasoningOut);
     if (!ok) {
+      history_.resize(histBeforeTurn);
       // Deliver a final (error) message so the UI never stays stuck on
       // "正在发送...". If we got partial text, use it; otherwise show the real
       // cause (HTTP status + provider message / transport error) so the wrist
@@ -843,6 +1227,7 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
         assistant.content = textOut;
         assistant.reasoningContent = reasoningOut;
         history_.push_back(std::move(assistant));
+        persistHistory();
       }
       if (truncated) {
         // The provider hit its output budget mid-reply. Continue the loop so
@@ -872,6 +1257,7 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
     assistant.toolCalls = toolCalls;
     assistant.reasoningContent = reasoningOut;
     history_.push_back(assistant);
+    persistHistory();
 
     for (const auto& call : toolCalls) {
       const std::string name = call["function"]["name"].get<std::string>();
@@ -886,6 +1272,21 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
           args = nlohmann::json::parse(call["function"]["arguments"].get<std::string>());
         } catch (...) {
         }
+      }
+
+      // Per-tool-call diagnostic: name, raw argument string and parsed state.
+      // Helps debug loops where the model keeps omitting required parameters.
+      {
+        std::string rawArgs;
+        if (call["function"].contains("arguments") &&
+            call["function"]["arguments"].is_string())
+          rawArgs = call["function"]["arguments"].get<std::string>();
+        if (rawArgs.size() > 200) rawArgs = rawArgs.substr(0, 200) + "...";
+        const std::string parseState =
+            args.is_object() ? (args.empty() ? "EMPTY-OBJECT" : "ok")
+                             : (args.is_discarded() || args.is_null() ? "PARSE-FAIL" : "non-object");
+        log("[ToolLoop] turn#" + std::to_string(guard) + " call name=" + name +
+            " rawArgs=\"" + rawArgs + "\" parsed=" + parseState);
       }
 
       SessionEvent start;
@@ -956,14 +1357,26 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
       done.result = resultText;
       emit(done);
 
+      // Tool result diagnostic (truncated).
+      {
+        std::string res = resultText;
+        if (res.size() > 200) res = res.substr(0, 200) + "...";
+        log("[ToolLoop] turn#" + std::to_string(guard) + " result name=" + name +
+            " text=\"" + res + "\"");
+      }
+
       ChatMessage toolMsg;
       toolMsg.role = "tool";
       toolMsg.content = resultText;
       toolMsg.toolCallId = id;
       history_.push_back(std::move(toolMsg));
+      persistHistory();
 
-      // If this tool produced a screenshot, persist it as a user message so the
-      // model sees it in the next runTurn of this loop AND in future turns.
+      // Screenshot/audio attachments are NOT inserted inline: with parallel
+      // tool calls the assistant(tool_calls) message pairs with ALL tool
+      // messages of the batch, and a user message in between violates the
+      // protocol (some providers 400 on "tool messages must immediately
+      // follow"). Collect them and append after the whole batch below.
       if (!toolImagePart_.type.empty()) {
         ChatMessage imgMsg;
         imgMsg.role = "user";
@@ -972,7 +1385,7 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
         tp.text = toolImageText_;
         imgMsg.parts.push_back(std::move(tp));
         imgMsg.parts.push_back(std::move(toolImagePart_));
-        history_.push_back(std::move(imgMsg));
+        mediaMessages_.push_back(std::move(imgMsg));
         toolImagePart_ = ContentPart();  // reset for next tool call
         toolImageText_.clear();
       }
@@ -984,11 +1397,16 @@ void LlmSession::prompt(const std::string& text, const std::vector<ContentPart>&
         tp.text = toolAudioText_;
         audMsg.parts.push_back(std::move(tp));
         audMsg.parts.push_back(std::move(toolAudioPart_));
-        history_.push_back(std::move(audMsg));
+        mediaMessages_.push_back(std::move(audMsg));
         toolAudioPart_ = ContentPart();  // reset for next tool call
         toolAudioText_.clear();
       }
     }
+    // Append collected image/audio attachments AFTER the complete tool batch
+    // so assistant(tool_calls) -> tool x N -> user(media) ordering holds.
+    for (auto& m : mediaMessages_) history_.push_back(std::move(m));
+    mediaMessages_.clear();
+    persistHistory();
   }
 }
 

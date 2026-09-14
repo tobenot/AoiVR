@@ -806,7 +806,6 @@ bool LlmSession::runTurn(std::vector<ChatMessage>& history,
     }
   }
   return true;
-  }
 }
 
 void LlmSession::setHistoryFile(const std::string& path) {

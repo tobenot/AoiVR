@@ -82,7 +82,10 @@ public class AoiOrchestrator : MonoBehaviour{
     private bool textureSubmitted = false;
     private System.IO.StreamWriter logWriter;
     private SteamVROverlayInput inputComponent;
-    private System.Threading.Mutex singleInstanceMutex;
+    // System.Threading.Mutex is not supported by the Windows IL2CPP player in
+    // this Unity version. Use the Win32 named mutex directly so the single-
+    // instance guard is functional in the shipped desktop build.
+    private IntPtr singleInstanceMutexHandle = IntPtr.Zero;
     private bool quittingDueToSecondInstance = false;
     private AudioSource clickAudio;
     private AudioClip clickClip;
@@ -94,8 +97,12 @@ public class AoiOrchestrator : MonoBehaviour{
     [DllImport("user32.dll")] private static extern IntPtr GetTopWindow(IntPtr hWnd);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool AllocConsole();
+    [DllImport("kernel32.dll", EntryPoint = "CreateMutexW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateMutexW(IntPtr lpMutexAttributes, bool bInitialOwner, string lpName);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CloseHandle(IntPtr hObject);
     [DllImport("kernel32.dll")] private static extern IntPtr GetStdHandle(int nStdHandle);
     private const int STD_OUTPUT_HANDLE = -11;
+    private const int ERROR_ALREADY_EXISTS = 183;
     private static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOACTIVATE = 0x0010;
@@ -124,17 +131,9 @@ public class AoiOrchestrator : MonoBehaviour{
     void Awake()    {
         DontDestroyOnLoad(gameObject);
         try        {
-            singleInstanceMutex = new System.Threading.Mutex(true, @"Global\AoiVR_SingleInstance");
-            bool acquired;
-            try        {
-                acquired = singleInstanceMutex.WaitOne(0);
-            }
-            catch (System.Threading.AbandonedMutexException)        {
-                // A previous instance crashed without releasing the mutex.
-                // The mutex is ours now — treat as acquired.
-                acquired = true;
-            }
-            if (!acquired)            {
+            singleInstanceMutexHandle = CreateMutexW(IntPtr.Zero, true, @"Global\AoiVR_SingleInstance");
+            int mutexError = Marshal.GetLastWin32Error();
+            if (singleInstanceMutexHandle != IntPtr.Zero && mutexError == ERROR_ALREADY_EXISTS)            {
                 quittingDueToSecondInstance = true;
                 AllocConsole();
                 var h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -144,9 +143,14 @@ public class AoiOrchestrator : MonoBehaviour{
                     sw.WriteLine("Another AoiVR instance is already running.");
                     sw.WriteLine("This instance will exit in 3 seconds.");
                 }
+                CloseHandle(singleInstanceMutexHandle);
+                singleInstanceMutexHandle = IntPtr.Zero;
                 System.Threading.Thread.Sleep(3000);
                 Application.Quit();
                 return;
+            }
+            if (singleInstanceMutexHandle == IntPtr.Zero)            {
+                Debug.Log($"Mutex check failed (CreateMutexW win32={mutexError}, continuing)");
             }
         }
         catch (System.Exception e)        {
@@ -2473,13 +2477,13 @@ void TakeScreenshotForAgent(string requestId)    {
             captureTex2D = null;
         }
         Log("Shutdown complete");
-        if (singleInstanceMutex != null)        {
+        if (singleInstanceMutexHandle != IntPtr.Zero)        {
             try {
- singleInstanceMutex.ReleaseMutex();
- }
- catch {
- }
-            singleInstanceMutex = null;
+                CloseHandle(singleInstanceMutexHandle);
+            }
+            catch {
+            }
+            singleInstanceMutexHandle = IntPtr.Zero;
         }
         logWriter?.Close();
         logWriter = null;

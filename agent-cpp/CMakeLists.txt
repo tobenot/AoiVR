@@ -369,6 +369,7 @@ add_executable(aoi-cache-lab
   src/base64.cpp
   src/http_client.cpp
   src/llm_client.cpp
+  src/remote_asr.cpp
 )
 target_include_directories(aoi-cache-lab PRIVATE src third_party third_party/nlohmann third_party/base64)
 if(MSVC)

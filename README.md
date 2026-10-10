@@ -80,7 +80,18 @@ cmake --build build --config Release --target aoi-agent-dll
 
 或者用 `agent-cpp\gate.cmd` 运行完整质量门禁（配置 + 构建 + 全部测试套件）。
 
-### 2. Unity 客户端
+### 2. 镜像截图插件
+
+`MirrorCapture.dll` 是独立的原生插件，不由 `aoi-agent-dll` 目标生成。需要从源码重建或更新这个插件时，在已安装 MSVC x64 工具的 Windows 机器执行：
+
+```bat
+cd native\MirrorCapture
+build.cmd
+```
+
+输出直接写入 `unity-client/Assets/Aoi/Plugins/x86_64/MirrorCapture.dll`。源码、构建脚本及当前插件都已入库，细节见 [MirrorCapture 说明](native/MirrorCapture/README.md)。
+
+### 3. Unity 客户端
 
 1. 复制 `agent-cpp/build/Release/aoi_agent.dll` 到
    `unity-client/Assets/Aoi/Plugins/x86_64/aoi_agent.dll`
@@ -92,6 +103,8 @@ Unity.exe -batchmode -nographics -quit ^
 ```
 
 输出：`unity-client/Build/AoiVR.exe`。
+
+`BuildScript.Build` 会从 `AoiBootstrap` 生成 `Assets/AoiMain.unity` 后再构建，场景生成入口是已入库的 `Assets/Editor/Build.cs`，无需找回旧机器生成的场景。TMP Essentials、Noto Sans CJK 和 JetBrains Mono 资源及其 `.meta` 已在此仓库保存，完整检出不默认重复导入或重烘字体。
 
 构建会自动把以下内容复制到输出目录（随发布包分发）：
 - `aoi_config.json.example`（运行时配置模板）

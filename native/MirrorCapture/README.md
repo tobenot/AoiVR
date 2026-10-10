@@ -17,7 +17,7 @@ environment-awareness (1 fps frame capture) pipeline.
 int MirrorShot(void* pDevice, void* pCtx, void* pSrv, const char* outBmpPath);
 ```
 
-P/Invoke declaration in `unity-client/Assets/Jarvis/Scripts/Core/JarvisOrchestrator.cs`:
+P/Invoke declaration in `unity-client/Assets/Aoi/Scripts/Core/AoiOrchestrator.cs`:
 
 ```csharp
 [DllImport("MirrorCapture.dll")]
@@ -31,7 +31,7 @@ build.cmd
 ```
 
 Requires Visual Studio with MSVC x64 tools. Output lands at
-`unity-client/Assets/Jarvis/Plugins/x86_64/MirrorCapture.dll`, which Unity
+`unity-client/Assets/Aoi/Plugins/x86_64/MirrorCapture.dll`, which Unity
 copies into the build automatically.
 
 ## Provenance
